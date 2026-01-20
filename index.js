@@ -60,7 +60,10 @@ async function log(msg) {
 /* ================= RECONCILE ================= */
 async function reconcile() {
   const state = await readState();
-  const shouldOpen = workIsOpen(state);
+  const now = DateTime.now().setZone(TZ);
+  const isSunday = now.weekday === 7; // 7 = domingo
+  const shouldOpen = state.override !== null ? state.override : isSunday;
+
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(CHANNEL_ID);
   const perms = channel.permissionsFor(guild.roles.everyone);
@@ -68,15 +71,22 @@ async function reconcile() {
 
   if (isOpen !== shouldOpen) {
     await setWorkPermission(shouldOpen);
+
     const embed = new EmbedBuilder()
       .setTitle(shouldOpen ? '💰 WORK LIBERADO' : '⛔ WORK ENCERRADO')
-      .setDescription(shouldOpen ? 'Use `/work` até 00:00 para apostas.' : 'Apostas encerradas. Boa semana!')
+      .setDescription(
+        shouldOpen
+          ? 'Use `/work` até 00:00 para apostas.'
+          : '⛔ WORK fechado — só funciona aos domingos!'
+      )
       .setColor(shouldOpen ? 0x00ff99 : 0xff5555)
       .setTimestamp();
+
     await channel.send({ embeds: [embed] });
     await log(`Sistema ajustado automaticamente → ${shouldOpen ? 'ABERTO' : 'FECHADO'}`);
   }
 }
+
 
 /* ================= COMMANDS ================= */
 const commands = [
