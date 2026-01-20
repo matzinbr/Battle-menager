@@ -1,6 +1,6 @@
 /**
- * ARENA BETS — WORK SYSTEM + X1 RESULTADO COMPLETO
- * Versão Profissional Atualizada
+ * ARENA BETS — WORK SYSTEM + X1 RESULTADO PROFISSIONAL
+ * Versão Profissional 1.0 — Antispam, Embeds Bonitos, Ranking Completo
  */
 
 require('dotenv').config();
@@ -33,19 +33,20 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 /* ================= STATE ================= */
-async function readState() {
-  try { return JSON.parse(await fs.readFile(STATE_FILE, 'utf8')); } catch { return { override: null }; }
+async function readState() { 
+  try { return JSON.parse(await fs.readFile(STATE_FILE, 'utf8')); } 
+  catch { return { override: null }; }
 }
 async function saveState(state) { await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2)); }
 
 /* ================= RANKING ================= */
 async function loadRanking() {
-  try { return JSON.parse(await fs.readFile(RANK_FILE, 'utf8')); } catch { return { players: {} }; }
+  try { return JSON.parse(await fs.readFile(RANK_FILE, 'utf8')); } 
+  catch { return { players: {} }; }
 }
-async function saveRanking(ranking) {
-  await fs.writeFile(RANK_FILE, JSON.stringify(ranking, null, 2));
-}
-async function recordMatch(winner, loser, valor) {
+async function saveRanking(ranking) { await fs.writeFile(RANK_FILE, JSON.stringify(ranking, null, 2)); }
+
+async function recordMatch(winner, loser) {
   const ranking = await loadRanking();
   if (!ranking.players[winner.id]) ranking.players[winner.id] = { name: winner.username, wins: 0, losses: 0, streak: 0, games: 0 };
   if (!ranking.players[loser.id]) ranking.players[loser.id] = { name: loser.username, wins: 0, losses: 0, streak: 0, games: 0 };
@@ -62,9 +63,22 @@ async function recordMatch(winner, loser, valor) {
 
   await saveRanking(ranking);
 }
+
 async function getLeaderboard() {
   const ranking = await loadRanking();
   return Object.values(ranking.players).sort((a,b) => b.wins - a.wins).slice(0,10);
+}
+
+/* ================= ANTISPAM ================= */
+const cooldowns = new Map(); // id do usuário → timestamp
+
+function isOnCooldown(userId) {
+  const now = Date.now();
+  const last = cooldowns.get(userId) || 0;
+  return now - last < 10000; // 10 segundos
+}
+function setCooldown(userId) {
+  cooldowns.set(userId, Date.now());
 }
 
 /* ================= TIME LOGIC ================= */
@@ -170,10 +184,8 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ embeds: [new EmbedBuilder().setTitle(open ? '✅ WORK LIBERADO' : '⛔ WORK BLOQUEADO').setColor(open ? 0x00ff99 : 0xff5555)], ephemeral: true });
   }
 
-  if (!isAdmin) {
-    if (['forcar-work', 'clear-override', 'x1_result'].includes(interaction.commandName)) {
-      return interaction.reply({ content: '🔒 Apenas a staff pode usar este comando.', ephemeral: true });
-    }
+  if (!isAdmin && ['forcar-work', 'clear-override', 'x1_result'].includes(interaction.commandName)) {
+    return interaction.reply({ content: '🔒 Apenas a staff pode usar este comando.', ephemeral: true });
   }
 
   if (interaction.commandName === 'forcar-work') {
@@ -197,24 +209,19 @@ client.on('interactionCreate', async interaction => {
       const perdedor = interaction.options.getUser('perdedor');
       const valor = interaction.options.getNumber('valor');
 
-      if (!vencedor || !perdedor || !valor) {
-        return interaction.reply({ content: '❌ Preencha todos os campos corretamente!', ephemeral: true });
-      }
+      if (!vencedor || !perdedor || !valor) return interaction.reply({ content: '❌ Preencha todos os campos corretamente!', ephemeral: true });
+      if (valor <= 0) return interaction.reply({ content: '❌ O valor da aposta deve ser maior que 0!', ephemeral: true });
+      if (vencedor.id === perdedor.id) return interaction.reply({ content: '❌ O vencedor e o perdedor não podem ser a mesma pessoa!', ephemeral: true });
+      if (isOnCooldown(interaction.user.id)) return interaction.reply({ content: '⏳ Aguarde 10 segundos antes de registrar outra partida!', ephemeral: true });
 
-      if (valor <= 0) {
-        return interaction.reply({ content: '❌ O valor da aposta deve ser maior que 0!', ephemeral: true });
-      }
-
-      if (vencedor.id === perdedor.id) {
-        return interaction.reply({ content: '❌ O vencedor e o perdedor não podem ser a mesma pessoa!', ephemeral: true });
-      }
+      setCooldown(interaction.user.id);
 
       const total = valor * 2;
-      await recordMatch(vencedor, perdedor, valor);
+      await recordMatch(vencedor, perdedor);
 
       const embed = new EmbedBuilder()
         .setTitle('🎮 Resultado X1')
-        .setDescription(`${vencedor.username} ganhou do ${perdedor.username}\n💰 Dinheiro total apostado: ${total} yens`)
+        .setDescription(`**${vencedor.username}** ganhou do **${perdedor.username}**\n💰 Dinheiro total apostado: ${total} yens`)
         .setColor(0x00ff99)
         .setTimestamp();
 
@@ -238,10 +245,12 @@ client.on('interactionCreate', async interaction => {
     else {
       let desc = '';
       leaderboard.forEach((p, i) => {
-        desc += `**${i + 1}. ${p.name}** - Vitórias: ${p.wins} - Derrotas: ${p.losses} - Streak: ${p.streak}\n`;
+        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`;
+        desc += `${medal} **${p.name}** - Vitórias: ${p.wins} | Derrotas: ${p.losses} | Streak: ${p.streak}\n`;
       });
       embed.setDescription(desc);
     }
+
     await interaction.reply({ embeds: [embed] });
   }
 
@@ -254,7 +263,7 @@ client.on('interactionCreate', async interaction => {
 
     const embed = new EmbedBuilder()
       .setTitle(`📊 Perfil de ${player.name}`)
-      .setDescription(`Vitórias: ${player.wins}\nDerrotas: ${player.losses}\nStreak atual: ${player.streak}\nPartidas jogadas: ${player.games}`)
+      .setDescription(`🏆 Vitórias: ${player.wins}\n💀 Derrotas: ${player.losses}\n🔥 Streak atual: ${player.streak}\n🎮 Partidas jogadas: ${player.games}`)
       .setColor(0x00ccff)
       .setTimestamp();
 
