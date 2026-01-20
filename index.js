@@ -29,7 +29,6 @@ async function setChannelCommandsAllowed(guildId, channelId, allow) {
     return false;
   }
 }
-
 // Domingo 09:00 - libera
 cron.schedule('0 9 * * 0', async () => {
   if (!client.isReady()) return;
@@ -59,3 +58,30 @@ cron.schedule('0 0 * * 1', async () => {
 }, { timezone: TIMEZONE });
 
 client.login(process.env.TOKEN);
+
+const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName('status-work')
+    .setDescription('Mostra se o WORK está liberado ou bloqueado')
+].map(command => command.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+(async () => {
+  try {
+    console.log('🔄 Registrando comandos...');
+    await rest.put(
+      Routes.applicationGuildCommands(
+        client.user?.id || process.env.CLIENT_ID,
+        GUILD_ID
+      ),
+      { body: commands }
+    );
+    console.log('✅ Comandos registrados!');
+  } catch (error) {
+    console.error(error);
+  }
+})();
+
