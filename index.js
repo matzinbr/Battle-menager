@@ -84,4 +84,17 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     console.error(error);
   }
 })();
+let workLiberado = false;
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'status-work') {
+    await interaction.reply({
+      content: workLiberado ? '✅ WORK LIBERADO' : '⛔ WORK BLOQUEADO',
+      ephemeral: true
+    });
+  }
+});
+client.login(process.env.TOKEN);
 
