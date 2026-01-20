@@ -1,14 +1,8 @@
-/**
- * ARENA BETS — WORK SYSTEM
- * Final Professional Version
- */
-
 require('dotenv').config();
 const fs = require('fs').promises;
 const path = require('path');
 const cron = require('node-cron');
 const { DateTime } = require('luxon');
-
 const {
   Client,
   GatewayIntentBits,
@@ -19,6 +13,8 @@ const {
   EmbedBuilder
 } = require('discord.js');
 
+const { recordMatch, getLeaderboard } = require('./ranking.js');
+
 /* ================= CONFIG ================= */
 
 const TOKEN = process.env.TOKEN;
@@ -27,7 +23,6 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 const TZ = process.env.TZ || 'America/Sao_Paulo';
-
 const STATE_FILE = path.join(__dirname, 'arena_state.json');
 
 /* ================= CLIENT ================= */
@@ -115,6 +110,7 @@ async function reconcile() {
 /* ================= COMMANDS ================= */
 
 const commands = [
+  // WORK commands
   new SlashCommandBuilder()
     .setName('status-work')
     .setDescription('Mostra se o WORK está disponível'),
@@ -130,7 +126,19 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('clear-override')
-    .setDescription('Remove o controle manual e volta ao automático')
+    .setDescription('Remove o controle manual e volta ao automático'),
+
+  // Ranking / X1 commands
+  new SlashCommandBuilder()
+    .setName('x1_result')
+    .setDescription('Registrar resultado de uma aposta X1')
+    .addUserOption(o => o.setName('vencedor').setDescription('Quem ganhou').setRequired(true))
+    .addUserOption(o => o.setName('perdedor').setDescription('Quem perdeu').setRequired(true))
+    .addIntegerOption(o => o.setName('fichas').setDescription('Quantas fichas').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('rank')
+    .setDescription('Mostra o ranking top 10')
 ].map(c => c.toJSON());
 
 /* ================= READY ================= */
@@ -162,6 +170,7 @@ client.on('interactionCreate', async interaction => {
     interaction.memberPermissions.has(PermissionFlagsBits.Administrator) ||
     (ADMIN_ROLE_ID && interaction.member.roles.cache.has(ADMIN_ROLE_ID));
 
+  // WORK commands
   if (interaction.commandName === 'status-work') {
     const open = workIsOpen(state);
     return interaction.reply({
@@ -193,6 +202,25 @@ client.on('interactionCreate', async interaction => {
     await saveState(state);
     await reconcile();
     return interaction.reply({ content: '♻ Sistema voltou ao automático.', ephemeral: true });
+  }
+
+  // X1 / Ranking commands
+  if (interaction.commandName === 'x1_result') {
+    const vencedor = interaction.options.getUser('vencedor');
+    const perdedor = interaction.options.getUser('perdedor');
+    const fichas = interaction.options.getInteger('fichas');
+
+    await recordMatch(vencedor, perdedor, fichas);
+    await interaction.reply(`${vencedor.username} venceu ${perdedor.username} por ${fichas} fichas! Ranking atualizado.`);
+  }
+
+  if (interaction.commandName === 'rank') {
+    const leaderboard = await getLeaderboard();
+    let msg = "**🏆 Ranking Top 10**\n";
+    leaderboard.forEach((p, i) => {
+      msg += `${i+1}. ${p.name} - Vitórias: ${p.wins}, Fichas: ${p.chips}\n`;
+    });
+    await interaction.reply(msg);
   }
 });
 
