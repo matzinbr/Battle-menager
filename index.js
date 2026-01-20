@@ -92,12 +92,12 @@ const commands = [
   new SlashCommandBuilder().setName('clear-override').setDescription('Remove o controle manual e volta ao automático'),
 
   // Comando X1 atualizado
-  new SlashCommandBuilder()
-    .setName('x1_result')
-    .setDescription('Registrar resultado de uma partida X1')
-    .addUserOption(o => o.setName('vencedor').setDescription('Quem ganhou').setRequired(true))
-    .addUserOption(o => o.setName('perdedor').setDescription('Quem perdeu').setRequired(true))
-    .addNumberOption(o => o.setName('valor').setDescription('Quanto cada um apostou').setRequired(true)),
+ new SlashCommandBuilder()
+  .setName('x1_result')
+  .setDescription('Registrar resultado de uma partida X1')
+  .addUserOption(o => o.setName('vencedor').setDescription('Quem ganhou').setRequired(true))
+  .addUserOption(o => o.setName('perdedor').setDescription('Quem perdeu').setRequired(true))
+  .addNumberOption(o => o.setName('valor').setDescription('Quanto cada um apostou').setRequired(true)),
 
   // Ranking e profile (opcional, apenas visual)
   new SlashCommandBuilder().setName('rank').setDescription('Mostra o ranking top 10'),
