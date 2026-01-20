@@ -1,18 +1,18 @@
 /**
- * Arena Controller - Stable Production Version
- * - Auto schedule with cron
- * - Persistent manual override (arena_state.json)
- * - Reconciliation loop (self-healing)
- * - Slash commands:
- *   /status-work
- *   /forcar-work
- *   /clear-override
+ * ARENA BETS — WORK CONTROLLER
+ * Professional & Stable Edition
  *
- * ENV REQUIRED:
+ * Features:
+ * - Automatic Sunday WORK schedule
+ * - Persistent manual override
+ * - Auto reconciliation (self-healing)
+ * - Slash commands for status & staff control
+ *
+ * Required ENV:
  * TOKEN, GUILD_ID, CHANNEL_ID
  *
- * OPTIONAL:
- * ADMIN_ROLE_ID, LOG_CHANNEL_ID, TZ, WORK_OPEN_HOUR, WORK_CLOSE_HOUR
+ * Optional ENV:
+ * TZ, ADMIN_ROLE_ID, LOG_CHANNEL_ID
  */
 
 require('dotenv').config();
@@ -36,18 +36,16 @@ const {
 const TOKEN = process.env.TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const CHANNEL_ID = process.env.CHANNEL_ID;
-
-const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null;
-
+const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 const TIMEZONE = process.env.TZ || 'America/Sao_Paulo';
-const WORK_OPEN_HOUR = parseInt(process.env.WORK_OPEN_HOUR || '9', 10);   // 09:00
-const WORK_CLOSE_HOUR = parseInt(process.env.WORK_CLOSE_HOUR || '23', 10); // 23:59
 
 const STATE_FILE = path.join(__dirname, 'arena_state.json');
 
+/* ===================== VALIDATION ===================== */
+
 if (!TOKEN || !GUILD_ID || !CHANNEL_ID) {
-  console.error('❌ Missing ENV variables');
+  console.error('❌ Missing ENV variables.');
   process.exit(1);
 }
 
@@ -63,9 +61,10 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 async function readState() {
   try {
-    return JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
+    const raw = await fs.readFile(STATE_FILE, 'utf8');
+    return JSON.parse(raw);
   } catch {
-    return { manualOverride: null };
+    return { override: null };
   }
 }
 
@@ -73,72 +72,67 @@ async function writeState(state) {
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-/* ===================== LOG ===================== */
+/* ===================== TIME LOGIC ===================== */
+
+function isSundayOpen() {
+  const now = DateTime.now().setZone(TIMEZONE);
+  return now.weekday === 7 && now.hour >= 9 && now.hour < 24;
+}
+
+function effectiveState(state) {
+  if (state.override !== null) return state.override;
+  return isSundayOpen();
+}
+
+/* ===================== PERMISSIONS ===================== */
+
+async function setWorkPermission(allow) {
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const channel = await guild.channels.fetch(CHANNEL_ID);
+  await channel.permissionOverwrites.edit(guild.roles.everyone, {
+    UseApplicationCommands: allow
+  });
+  return channel;
+}
+
+/* ===================== LOGGING ===================== */
 
 async function log(msg) {
   console.log(msg);
   if (!LOG_CHANNEL_ID) return;
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(LOG_CHANNEL_ID);
-    if (channel?.isTextBased()) await channel.send(`📝 ${msg}`);
+    const ch = await guild.channels.fetch(LOG_CHANNEL_ID);
+    await ch.send(`📝 ${msg}`);
   } catch {}
 }
 
-/* ===================== SCHEDULE ===================== */
-
-function scheduledWorkOpen() {
-  const now = DateTime.now().setZone(TIMEZONE);
-  return (
-    now.weekday === 7 && // Domingo
-    now.hour >= WORK_OPEN_HOUR &&
-    now.hour <= WORK_CLOSE_HOUR
-  );
-}
-
-function effectiveWorkOpen(state) {
-  if (state.manualOverride !== null) {
-    return state.manualOverride.open;
-  }
-  return scheduledWorkOpen();
-}
-
-/* ===================== PERMISSIONS ===================== */
-
-async function setChannelCommandsAllowed(allow) {
-  const guild = await client.guilds.fetch(GUILD_ID);
-  const channel = await guild.channels.fetch(CHANNEL_ID);
-
-  if (!channel.isTextBased()) return;
-
-  await channel.permissionOverwrites.edit(guild.roles.everyone, {
-    UseApplicationCommands: allow
-  });
-}
+/* ===================== RECONCILE ===================== */
 
 async function reconcile() {
   const state = await readState();
-  const shouldBeOpen = effectiveWorkOpen(state);
+  const shouldOpen = effectiveState(state);
 
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(CHANNEL_ID);
   const perms = channel.permissionsFor(guild.roles.everyone);
+  const isOpen = perms.has(PermissionFlagsBits.UseApplicationCommands);
 
-  const isOpen = perms?.has(PermissionFlagsBits.UseApplicationCommands);
-
-  if (isOpen !== shouldBeOpen) {
-    await setChannelCommandsAllowed(shouldBeOpen);
+  if (isOpen !== shouldOpen) {
+    await setWorkPermission(shouldOpen);
 
     const embed = new EmbedBuilder()
-      .setTitle(shouldBeOpen ? '💰 WORK LIBERADO' : '⛔ WORK ENCERRADO')
-      .setColor(shouldBeOpen ? 0x00ff7f : 0x808080)
+      .setTitle(shouldOpen ? '💰 WORK LIBERADO' : '⛔ WORK ENCERRADO')
+      .setDescription(
+        shouldOpen
+          ? 'Use `/work` até 00:00 para apostas.'
+          : 'Apostas encerradas. Boa semana!'
+      )
+      .setColor(shouldOpen ? 0x00ff99 : 0xff5555)
       .setTimestamp();
 
-    try {
-      await channel.send({ embeds: [embed] });
-    } catch {}
-
-    await log(`Reconciliação: WORK ${shouldBeOpen ? 'ABERTO' : 'FECHADO'}`);
+    await channel.send({ embeds: [embed] });
+    await log(`Reconciliação automática → ${shouldOpen ? 'ABERTO' : 'FECHADO'}`);
   }
 }
 
@@ -147,15 +141,13 @@ async function reconcile() {
 const commands = [
   new SlashCommandBuilder()
     .setName('status-work')
-    .setDescription('Mostra o status atual do WORK'),
+    .setDescription('Mostra se o WORK está aberto'),
 
   new SlashCommandBuilder()
     .setName('forcar-work')
     .setDescription('Força abrir ou fechar o WORK')
     .addBooleanOption(o =>
-      o.setName('open')
-        .setDescription('true = abrir | false = fechar')
-        .setRequired(true)
+      o.setName('open').setDescription('Abrir ou fechar').setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -166,33 +158,25 @@ const commands = [
 /* ===================== READY ===================== */
 
 client.once('ready', async () => {
-  console.log(`✅ Bot online: ${client.user.tag}`);
-  await log('Bot iniciado');
+  console.log(`✅ Online como ${client.user.tag}`);
+  await log(`Bot online: ${client.user.tag}`);
 
   await rest.put(
     Routes.applicationGuildCommands(client.user.id, GUILD_ID),
     { body: commands }
   );
 
+  await writeState(await readState());
   await reconcile();
 
-  // Reconciliação automática (auto-correção)
+  // Domingo 09:00
+  cron.schedule('0 9 * * 0', reconcile, { timezone: TIMEZONE });
+
+  // Segunda 00:00
+  cron.schedule('0 0 * * 1', reconcile, { timezone: TIMEZONE });
+
+  // Auto check a cada 5 min
   cron.schedule('*/5 * * * *', reconcile, { timezone: TIMEZONE });
-
-  // Avisos
-  cron.schedule('0 21 * * 0', async () => {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(CHANNEL_ID);
-    if (channel?.isTextBased())
-      channel.send('⏳ Faltam **3 horas** para o fechamento do WORK');
-  }, { timezone: TIMEZONE });
-
-  cron.schedule('0 23 * * 0', async () => {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(CHANNEL_ID);
-    if (channel?.isTextBased())
-      channel.send('⚠️ **Última hora** para usar /work');
-  }, { timezone: TIMEZONE });
 });
 
 /* ===================== INTERACTIONS ===================== */
@@ -201,53 +185,46 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const state = await readState();
+
   const isAdmin =
-    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
-    (ADMIN_ROLE_ID && interaction.member.roles.cache.has(ADMIN_ROLE_ID));
+    interaction.memberPermissions.has(PermissionFlagsBits.Administrator) ||
+    (ADMIN_ROLE_ID &&
+      interaction.member.roles.cache.has(ADMIN_ROLE_ID));
 
   if (interaction.commandName === 'status-work') {
-    const open = effectiveWorkOpen(state);
-    await interaction.reply({
-      content: open ? '✅ WORK LIBERADO' : '⛔ WORK BLOQUEADO',
+    const open = effectiveState(state);
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle(open ? '✅ WORK LIBERADO' : '⛔ WORK BLOQUEADO')
+          .setColor(open ? 0x00ff99 : 0xff5555)
+      ],
+      ephemeral: true
+    });
+  }
+
+  if (!isAdmin) {
+    return interaction.reply({
+      content: '🔒 Apenas a staff pode usar este comando.',
       ephemeral: true
     });
   }
 
   if (interaction.commandName === 'forcar-work') {
-    if (!isAdmin)
-      return interaction.reply({ content: '🔒 Sem permissão', ephemeral: true });
-
-    const open = interaction.options.getBoolean('open');
-    state.manualOverride = {
-      open,
-      by: interaction.user.tag,
-      at: new Date().toISOString()
-    };
-
+    state.override = interaction.options.getBoolean('open');
     await writeState(state);
     await reconcile();
-
-    await interaction.reply({
-      content: `✅ WORK forçado para **${open ? 'ABERTO' : 'FECHADO'}**`,
-      ephemeral: true
-    });
+    return interaction.reply({ content: '✅ Override aplicado.', ephemeral: true });
   }
 
   if (interaction.commandName === 'clear-override') {
-    if (!isAdmin)
-      return interaction.reply({ content: '🔒 Sem permissão', ephemeral: true });
-
-    state.manualOverride = null;
+    state.override = null;
     await writeState(state);
     await reconcile();
-
-    await interaction.reply({
-      content: '♻️ Override removido, sistema automático ativo',
-      ephemeral: true
-    });
+    return interaction.reply({ content: '♻ Override removido.', ephemeral: true });
   }
 });
 
-/* ===================== START ===================== */
+/* ===================== LOGIN ===================== */
 
 client.login(TOKEN);
