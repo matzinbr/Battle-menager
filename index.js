@@ -1,4 +1,19 @@
+/**
+ * Arena Controller - Professional Edition
+ * - Auto schedule (cron) to open/close /work
+ * - Manual overrides persisted to disk (state.json)
+ * - Reconciliation loop to keep channel permissions consistent
+ * - Slash commands: /status-work, /forcar-work, /clear-override
+ *
+ * ENV required: TOKEN, GUILD_ID, CHANNEL_ID
+ * Optional: LOG_CHANNEL_ID, ADMIN_ROLE_ID, TZ, WORK_OPEN_HOUR, WORK_CLOSE_HOUR
+ */
+
 require('dotenv').config();
+const fs = require('fs').promises;
+const path = require('path');
+const { DateTime } = require('luxon');
+const cron = require('node-cron');
 
 const {
   Client,
@@ -7,15 +22,8 @@ const {
   Routes,
   SlashCommandBuilder,
   PermissionFlagsBits,
-  EmbedBuilder,
+  EmbedBuilder
 } = require('discord.js');
-const cron = require('node-cron');
-
-/*
-  PROFESSIONAL ARENA CONTROLLER
-  Env required: TOKEN, GUILD_ID, CHANNEL_ID
-  Optional: LOG_CHANNEL_ID, ADMIN_ROLE_ID, TZ
-*/
 
 const TOKEN = process.env.TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
@@ -23,316 +31,309 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 const TIMEZONE = process.env.TZ || 'America/Sao_Paulo';
+const WORK_OPEN_HOUR = parseInt(process.env.WORK_OPEN_HOUR || '9', 10);  // default 09:00
+const WORK_CLOSE_HOUR = parseInt(process.env.WORK_CLOSE_HOUR || '24', 10); // default up to 23:59
+
+const STATE_FILE = path.join(__dirname, 'arena_state.json');
 
 if (!TOKEN || !GUILD_ID || !CHANNEL_ID) {
-  console.error('Missing required environment variables. Ensure TOKEN, GUILD_ID and CHANNEL_ID are set.');
+  console.error('Missing required environment variables: TOKEN, GUILD_ID, CHANNEL_ID');
   process.exit(1);
 }
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// --- State ---
-let workLiberado = false;
-
-// --- Helper: logging to console + log channel (if set) ---
-async function log(message) {
-  console.log(message);
-  if (!LOG_CHANNEL_ID) return;
+// ---------- Utilities ----------
+async function readState() {
   try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const logChannel = await guild.channels.fetch(LOG_CHANNEL_ID);
-    if (logChannel && logChannel.send) {
-      await logChannel.send(`📝 ${message}`);
-    }
+    const raw = await fs.readFile(STATE_FILE, 'utf8');
+    return JSON.parse(raw);
   } catch (err) {
-    console.error('Falha ao enviar log para canal:', err);
+    return { manualOverride: null }; // default state
   }
 }
 
-// --- Helper: set channel permission (allow or deny Use Application Commands for @everyone) ---
-async function setChannelCommandsAllowed(guildId, channelId, allow) {
+async function writeState(state) {
   try {
-    const guild = await client.guilds.fetch(guildId);
-    const channel = await guild.channels.fetch(channelId);
+    await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to write state file:', err);
+  }
+}
+
+async function logToChannel(msg) {
+  console.log(msg);
+  if (!LOG_CHANNEL_ID) return;
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const ch = await guild.channels.fetch(LOG_CHANNEL_ID);
+    if (ch && ch.send) await ch.send(`📝 ${msg}`);
+  } catch (err) {
+    console.error('Failed to send log to channel:', err);
+  }
+}
+
+/**
+ * Compute whether work should be open by schedule (ignores manual override)
+ * Rule: Sunday (Luxon weekday===7) and hour in [WORK_OPEN_HOUR, WORK_CLOSE_HOUR)
+ */
+function scheduledWorkOpen() {
+  const now = DateTime.now().setZone(TIMEZONE);
+  const weekday = now.weekday; // 1=Mon ... 7=Sun
+  const hour = now.hour;
+  return (weekday === 7) && (hour >= WORK_OPEN_HOUR && hour < WORK_CLOSE_HOUR);
+}
+
+/**
+ * Determine effective work open state:
+ * - manualOverride if present (object { open: bool, by: 'user#discrim', at: ISO })
+ * - otherwise scheduledWorkOpen
+ */
+function effectiveWorkOpen(state) {
+  if (state && state.manualOverride && typeof state.manualOverride.open === 'boolean') {
+    return state.manualOverride.open;
+  }
+  return scheduledWorkOpen();
+}
+
+/**
+ * Set channel permission UseApplicationCommands for @everyone
+ */
+async function setChannelCommandsAllowed(allow) {
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const channel = await guild.channels.fetch(CHANNEL_ID);
     const everyoneRole = guild.roles.everyone;
     await channel.permissionOverwrites.edit(everyoneRole, {
       UseApplicationCommands: allow
     });
     return channel;
   } catch (err) {
-    console.error('Erro ao editar permissões do canal:', err);
+    console.error('Error editing channel permissions:', err);
     return null;
   }
 }
 
-// --- Helper: read current channel state for UseApplicationCommands ---
-async function getChannelCommandsAllowed(guildId, channelId) {
+/**
+ * Reconcile channel permissions according to effective state.
+ * Returns true if changed/applied, false otherwise.
+ */
+async function reconcileAndApply(state) {
   try {
-    const guild = await client.guilds.fetch(guildId);
-    const channel = await guild.channels.fetch(channelId);
-    const everyonePerms = channel.permissionsFor(guild.roles.everyone);
-    if (!everyonePerms) return false;
-    return everyonePerms.has(PermissionFlagsBits.UseApplicationCommands);
+    const shouldBeOpen = effectiveWorkOpen(state);
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const channel = await guild.channels.fetch(CHANNEL_ID);
+    const perms = channel.permissionsFor(guild.roles.everyone);
+    const currentlyAllowed = perms ? perms.has(PermissionFlagsBits.UseApplicationCommands) : false;
+    if (currentlyAllowed !== shouldBeOpen) {
+      await setChannelCommandsAllowed(shouldBeOpen);
+      const embed = new EmbedBuilder()
+        .setTitle(shouldBeOpen ? '💰 WORK LIBERADO' : '⛔ WORK ENCERRADO')
+        .setDescription(shouldBeOpen ? `Com base na programação/override, /work está aberto.` : `Com base na programação/override, /work está fechado.`)
+        .setTimestamp()
+        .setColor(shouldBeOpen ? 0x00FF7F : 0x808080);
+      try { await channel.send({ embeds: [embed] }); } catch (e) { /* ignore */ }
+      await logToChannel(`Reconciled: work set to ${shouldBeOpen ? 'OPEN' : 'CLOSED'}`);
+      return true;
+    }
+    return false;
   } catch (err) {
-    console.error('Erro ao ler permissões do canal:', err);
+    console.error('Reconcile failed:', err);
     return false;
   }
 }
 
-// --- Commands definition (guild-scoped for instantaneous registration) ---
+// ---------- Slash commands ----------
 const commands = [
-  new SlashCommandBuilder()
-    .setName('status-work')
-    .setDescription('Mostra se o WORK está liberado ou bloqueado'),
+  new SlashCommandBuilder().setName('status-work').setDescription('Mostra se o WORK está liberado ou bloqueado'),
 
   new SlashCommandBuilder()
     .setName('forcar-work')
-    .setDescription('Força a liberação do /work (apenas staff)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator) // fallback for admins
-    .addBooleanOption(opt =>
-      opt.setName('open')
-         .setDescription('true para abrir, false para fechar')
-         .setRequired(true)
-    ),
+    .setDescription('Força abrir ou fechar o /work (apenas staff)')
+    .addBooleanOption(opt => opt.setName('open').setDescription('true para abrir, false para fechar').setRequired(true)),
 
   new SlashCommandBuilder()
-    .setName('fechar-work')
-    .setDescription('Fecha o /work imediatamente (apenas staff)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    .setName('clear-override')
+    .setDescription('Remove o override manual e volta ao agendamento (apenas staff)')
+].map(cmd => cmd.toJSON());
 
-  new SlashCommandBuilder()
-    .setName('announce-duel')
-    .setDescription('Anuncia um duelo na arena (staff)')
-    .addUserOption(o => o.setName('challenger').setDescription('Desafiante').setRequired(true))
-    .addUserOption(o => o.setName('opponent').setDescription('Oponente').setRequired(true))
-    .addStringOption(o => o.setName('note').setDescription('Observação / odds (opcional)')),
-].map(c => c.toJSON());
-
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-// --- READY: register commands, sync initial state, start crons ---
+// ---------- Ready ----------
 client.once('ready', async () => {
   console.log(`✅ Bot online: ${client.user.tag}`);
-  await log(`Bot online: ${client.user.tag}`);
+  await logToChannel(`Bot online: ${client.user.tag}`);
 
-  // Register guild commands
+  // Register guild commands (so they appear immediately)
   try {
-    console.log('🔄 Registrando comandos de guild...');
     await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
-    console.log('✅ Comandos registrados!');
-    await log('Comandos registrados no guild.');
+    console.log('Registered slash commands.');
+    await logToChannel('Slash commands registered.');
   } catch (err) {
-    console.error('Erro ao registrar comandos:', err);
-    await log('Erro ao registrar comandos: ' + (err.message || err));
+    console.error('Failed to register commands:', err);
+    await logToChannel('Failed to register commands: ' + (err.message || err));
   }
 
-  // Initialize workLiberado according to current channel permissions
-  try {
-    workLiberado = await getChannelCommandsAllowed(GUILD_ID, CHANNEL_ID);
-    console.log('Estado inicial workLiberado =', workLiberado);
-    await log(`Estado inicial: workLiberado = ${workLiberado}`);
-  } catch (err) {
-    console.error('Erro ao inicializar estado do canal:', err);
-  }
+  // Ensure a state file exists
+  let state = await readState();
+  if (!state) state = { manualOverride: null };
+  await writeState(state);
 
-  // Cron jobs (professional schedule)
-  // Domingo 09:00 - abre
+  // Initial reconciliation on startup
+  await reconcileAndApply(state);
+
+  // Cron jobs: schedule open/close/announcements
+  // Open: Sunday 09:00
   cron.schedule('0 9 * * 0', async () => {
-    try {
-      const channel = await setChannelCommandsAllowed(GUILD_ID, CHANNEL_ID, true);
-      if (channel) {
-        workLiberado = true;
-        const embed = new EmbedBuilder()
-          .setTitle('💰 WORK LIBERADO')
-          .setDescription('Hoje, até 00:00, o comando `/work` foi liberado exclusivamente para apostas.\nUse `/work` e receba 270 yens para participar.')
-          .setColor(0x00FF7F)
-          .setTimestamp();
-        await channel.send({ embeds: [embed] });
-        await log('WORK liberado automaticamente (cron).');
-      } else {
-        await log('Falha ao liberar WORK (cron).');
-      }
-    } catch (err) {
-      console.error('Erro no cron de liberação:', err);
-      await log('Erro no cron de liberação: ' + (err.message || err));
+    const stateNow = await readState();
+    // Only change if no manual override exists
+    if (stateNow.manualOverride === null) {
+      await setChannelCommandsAllowed(true);
+      await logToChannel('Cron: WORK opened (09:00 Sunday).');
+    } else {
+      await logToChannel('Cron: WORK open time reached, but manual override present. No automatic change.');
     }
   }, { timezone: TIMEZONE });
 
-  // Domingo 21:00 - aviso (3 horas para fechamento)
+  // Warning 3h before: Sunday 21:00
   cron.schedule('0 21 * * 0', async () => {
     try {
       const guild = await client.guilds.fetch(GUILD_ID);
-      const channel = await guild.channels.fetch(CHANNEL_ID);
+      const ch = await guild.channels.fetch(CHANNEL_ID);
       const embed = new EmbedBuilder()
-        .setTitle('⏳ Aviso de fechamento')
-        .setDescription('Faltam 3 horas para o fechamento das apostas. Use `/work` se ainda não usou.')
-        .setColor(0xFFD700)
-        .setTimestamp();
-      await channel.send({ embeds: [embed] });
-      await log('Aviso: 3 horas para fechamento enviado.');
-    } catch (err) {
-      console.error('Erro no cron de aviso 3h:', err);
-      await log('Erro no cron de aviso 3h: ' + (err.message || err));
+        .setTitle('⏳ Aviso: 3 horas para fechamento das apostas')
+        .setDescription('Use `/work` se deseja participar desta rodada.')
+        .setTimestamp()
+        .setColor(0xFFD700);
+      await ch.send({ embeds: [embed] });
+      await logToChannel('Cron: 3h warning sent.');
+    } catch (e) {
+      console.error('Warning cron failed:', e);
     }
   }, { timezone: TIMEZONE });
 
-  // Domingo 23:00 - aviso final (1 hora)
+  // Warning 1h before: Sunday 23:00
   cron.schedule('0 23 * * 0', async () => {
     try {
       const guild = await client.guilds.fetch(GUILD_ID);
-      const channel = await guild.channels.fetch(CHANNEL_ID);
+      const ch = await guild.channels.fetch(CHANNEL_ID);
       const embed = new EmbedBuilder()
-        .setTitle('⚠️ Última chamada')
-        .setDescription('Falta 1 hora para o fechamento das apostas. Última chance para usar `/work` e apostar.')
-        .setColor(0xFF4500)
-        .setTimestamp();
-      await channel.send({ embeds: [embed] });
-      await log('Aviso final: 1 hora para fechamento enviado.');
-    } catch (err) {
-      console.error('Erro no cron de aviso 1h:', err);
-      await log('Erro no cron de aviso 1h: ' + (err.message || err));
+        .setTitle('⚠️ Última chamada: 1 hora para fechamento')
+        .setDescription('Última chance para usar `/work` e participar das apostas.')
+        .setTimestamp()
+        .setColor(0xFF4500);
+      await ch.send({ embeds: [embed] });
+      await logToChannel('Cron: 1h warning sent.');
+    } catch (e) {
+      console.error('1h warning failed:', e);
     }
   }, { timezone: TIMEZONE });
 
-  // Segunda 00:00 - fecha
+  // Close: Monday 00:00
   cron.schedule('0 0 * * 1', async () => {
-    try {
-      const channel = await setChannelCommandsAllowed(GUILD_ID, CHANNEL_ID, false);
-      if (channel) {
-        workLiberado = false;
-        const embed = new EmbedBuilder()
-          .setTitle('⛔ WORK ENCERRADO')
-          .setDescription('As apostas foram encerradas. Boa semana!')
-          .setColor(0x808080)
-          .setTimestamp();
-        await channel.send({ embeds: [embed] });
-        await log('WORK encerrado automaticamente (cron).');
-      } else {
-        await log('Falha ao encerrar WORK (cron).');
-      }
-    } catch (err) {
-      console.error('Erro no cron de encerramento:', err);
-      await log('Erro no cron de encerramento: ' + (err.message || err));
+    const stateNow = await readState();
+    if (stateNow.manualOverride === null) {
+      await setChannelCommandsAllowed(false);
+      await logToChannel('Cron: WORK closed (00:00 Monday).');
+    } else {
+      await logToChannel('Cron: WORK close time reached, but manual override present. No automatic change.');
     }
+  }, { timezone: TIMEZONE });
+
+  // Reconciliation loop: every 5 minutes ensure permission matches effective state
+  cron.schedule('*/5 * * * *', async () => {
+    const stateNow = await readState();
+    await reconcileAndApply(stateNow);
   }, { timezone: TIMEZONE });
 });
 
-// --- Interaction handling ---
+// ---------- Interaction handling ----------
 client.on('interactionCreate', async interaction => {
   try {
     if (!interaction.isChatInputCommand()) return;
 
     const name = interaction.commandName;
+    const state = await readState();
 
-    // Helper: check admin role or Administrator permission
+    // helper to check admin via ADMIN_ROLE_ID or Administrator perm
     const isAdmin = () => {
-      if (ADMIN_ROLE_ID && interaction.member && interaction.member.roles) {
-        if (interaction.member.roles.cache.has(ADMIN_ROLE_ID)) return true;
-      }
-      // fallback to server admin permission
       try {
+        if (ADMIN_ROLE_ID && interaction.member && interaction.member.roles) {
+          if (interaction.member.roles.cache.has(ADMIN_ROLE_ID)) return true;
+        }
         return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
       } catch {
         return false;
       }
     };
 
-    // /status-work
     if (name === 'status-work') {
-      const allowed = await getChannelCommandsAllowed(GUILD_ID, CHANNEL_ID);
-      await interaction.reply({
-        content: allowed ? '✅ WORK LIBERADO (comandos habilitados no canal)' : '⛔ WORK BLOQUEADO (comandos desabilitados no canal)',
-        ephemeral: true
-      });
+      const effective = effectiveWorkOpen(state);
+      const embed = new EmbedBuilder()
+        .setTitle(effective ? '✅ WORK LIBERADO' : '⛔ WORK BLOQUEADO')
+        .setDescription(effective ? 'O /work está disponível agora.' : 'O /work está fechado agora.')
+        .addFields(
+          { name: 'Scheduling', value: `Aberto: Domingo ${WORK_OPEN_HOUR}:00 → ${WORK_CLOSE_HOUR - 1}:59 (Timezone: ${TIMEZONE})`, inline: false },
+          { name: 'Manual override', value: state.manualOverride ? `Sim — ${state.manualOverride.open ? 'ABERTO' : 'FECHADO'} (por ${state.manualOverride.by} em ${state.manualOverride.at})` : 'Não', inline: false }
+        )
+        .setTimestamp();
+      await interaction.reply({ embeds: [embed], ephemeral: true });
       return;
     }
 
-    // /forcar-work open:true/false
     if (name === 'forcar-work') {
       if (!isAdmin()) {
         await interaction.reply({ content: '🔒 Apenas staff pode usar este comando.', ephemeral: true });
         return;
       }
       const open = interaction.options.getBoolean('open', true);
-      const channel = await setChannelCommandsAllowed(GUILD_ID, CHANNEL_ID, open);
-      if (channel) {
-        workLiberado = open;
-        const embed = new EmbedBuilder()
-          .setTitle(open ? '💥 WORK ABERTO (FORÇADO)' : '🔒 WORK FECHADO (FORÇADO)')
-          .setDescription(open ? 'O /work foi aberto manualmente pela staff.' : 'O /work foi fechado manualmente pela staff.')
-          .setColor(open ? 0x00FF7F : 0xFF4500)
-          .setTimestamp();
-        await channel.send({ embeds: [embed] });
-        await interaction.reply({ content: `✅ Operação realizada: work ${open ? 'aberto' : 'fechado'}.`, ephemeral: true });
-        await log(`Comando forcar-work: work ${open ? 'aberto' : 'fechado'} por ${interaction.user.tag}`);
-      } else {
-        await interaction.reply({ content: '❌ Falha ao alterar permissões do canal.', ephemeral: true });
-      }
+      const newState = state;
+      newState.manualOverride = {
+        open,
+        by: `${interaction.user.tag}`,
+        at: new Date().toISOString()
+      };
+      await writeState(newState);
+      await setChannelCommandsAllowed(open);
+      await reconcileAndApply(newState);
+      await logToChannel(`Manual override by ${interaction.user.tag}: work ${open ? 'OPEN' : 'CLOSED'}`);
+      await interaction.reply({ content: `✅ Override aplicado: work ${open ? 'aberto' : 'fechado'}.`, ephemeral: true });
       return;
     }
 
-    // /fechar-work
-    if (name === 'fechar-work') {
+    if (name === 'clear-override') {
       if (!isAdmin()) {
         await interaction.reply({ content: '🔒 Apenas staff pode usar este comando.', ephemeral: true });
         return;
       }
-      const channel = await setChannelCommandsAllowed(GUILD_ID, CHANNEL_ID, false);
-      if (channel) {
-        workLiberado = false;
-        const embed = new EmbedBuilder()
-          .setTitle('⛔ WORK FECHADO (MANUAL)')
-          .setDescription('As apostas foram encerradas manualmente pela staff.')
-          .setColor(0x808080)
-          .setTimestamp();
-        await channel.send({ embeds: [embed] });
-        await interaction.reply({ content: '✅ WORK fechado manualmente.', ephemeral: true });
-        await log(`Comando fechar-work usado por ${interaction.user.tag}`);
-      } else {
-        await interaction.reply({ content: '❌ Falha ao fechar work.', ephemeral: true });
-      }
+      const newState = state;
+      newState.manualOverride = null;
+      await writeState(newState);
+      // Apply scheduled state immediately
+      await reconcileAndApply(newState);
+      await logToChannel(`Manual override cleared by ${interaction.user.tag}`);
+      await interaction.reply({ content: '✅ Override manual removido. Voltando ao agendamento.', ephemeral: true });
       return;
     }
 
-    // /announce-duel
-    if (name === 'announce-duel') {
-      if (!isAdmin()) {
-        await interaction.reply({ content: '🔒 Apenas staff pode anunciar duelos.', ephemeral: true });
-        return;
-      }
-      const challenger = interaction.options.getUser('challenger', true);
-      const opponent = interaction.options.getUser('opponent', true);
-      const note = interaction.options.getString('note') || '';
-      // Build embed
-      const embed = new EmbedBuilder()
-        .setTitle('🏯 CONFRONTO DE FEITICEIROS 🏯')
-        .addFields(
-          { name: 'Lutadores', value: `${challenger} VS ${opponent}`, inline: false },
-          { name: 'Status', value: '🔴 Apostas Abertas!', inline: false },
-        )
-        .setFooter({ text: note || 'Use u!give @Supervisor <valor> para apostar' })
-        .setTimestamp()
-        .setColor(0x6A0DAD);
-      // send to arena channel
-      const guild = await client.guilds.fetch(GUILD_ID);
-      const channel = await guild.channels.fetch(CHANNEL_ID);
-      await channel.send({ embeds: [embed] });
-      await interaction.reply({ content: '✅ Duelo anunciado!', ephemeral: true });
-      await log(`Duel announced: ${challenger.tag} vs ${opponent.tag} by ${interaction.user.tag}`);
-      return;
-    }
   } catch (err) {
-    console.error('Erro ao processar interação:', err);
+    console.error('Error handling interaction:', err);
     try {
       if (interaction && !interaction.replied) await interaction.reply({ content: '❌ Ocorreu um erro ao executar o comando.', ephemeral: true });
     } catch { /* ignore */ }
   }
 });
 
-// --- Login ---
-client.login(TOKEN).catch(err => {
-  console.error('Falha ao logar com o token:', err);
-  process.exit(1);
+// ---------- Startup login ----------
+client.login(TOKEN)
+  .then(() => console.log('Login successful'))
+  .catch(err => {
+    console.error('Failed to login:', err);
+    process.exit(1);
+  });
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully...');
+  client.destroy();
+  process.exit(0);
 });
