@@ -1,6 +1,6 @@
 /**
  * ARENA BETS — WORK SYSTEM + X1 RESULTADO SIMPLIFICADO
- * Versão Profissional Atualizada
+ * Versão Profissional Atualizada (sem utils.js)
  */
 
 require('dotenv').config();
@@ -17,8 +17,6 @@ const {
   PermissionFlagsBits,
   EmbedBuilder
 } = require('discord.js');
-
-const { log } = require('./utils.js'); // Caso você tenha função log separada, senão use a do index
 
 /* ================= CONFIG ================= */
 const TOKEN = process.env.TOKEN;
@@ -52,6 +50,17 @@ async function setWorkPermission(open) {
   const channel = await guild.channels.fetch(CHANNEL_ID);
   await channel.permissionOverwrites.edit(guild.roles.everyone, { UseApplicationCommands: open });
   return channel;
+}
+
+/* ================= LOG ================= */
+async function log(msg) {
+  console.log(msg);
+  if (!LOG_CHANNEL_ID) return;
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const ch = await guild.channels.fetch(LOG_CHANNEL_ID);
+    await ch.send(`📝 ${msg}`);
+  } catch {}
 }
 
 /* ================= RECONCILE ================= */
@@ -91,15 +100,13 @@ const commands = [
     .addBooleanOption(o => o.setName('abrir').setDescription('true = abrir / false = fechar').setRequired(true)),
   new SlashCommandBuilder().setName('clear-override').setDescription('Remove o controle manual e volta ao automático'),
 
-  // Comando X1 atualizado
- new SlashCommandBuilder()
-  .setName('x1_result')
-  .setDescription('Registrar resultado de uma partida X1')
-  .addUserOption(o => o.setName('vencedor').setDescription('Quem ganhou').setRequired(true))
-  .addUserOption(o => o.setName('perdedor').setDescription('Quem perdeu').setRequired(true))
-  .addNumberOption(o => o.setName('valor').setDescription('Quanto cada um apostou').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('x1_result')
+    .setDescription('Registrar resultado de uma partida X1')
+    .addUserOption(o => o.setName('vencedor').setDescription('Quem ganhou').setRequired(true))
+    .addUserOption(o => o.setName('perdedor').setDescription('Quem perdeu').setRequired(true))
+    .addNumberOption(o => o.setName('valor').setDescription('Quanto cada um apostou').setRequired(true)),
 
-  // Ranking e profile (opcional, apenas visual)
   new SlashCommandBuilder().setName('rank').setDescription('Mostra o ranking top 10'),
   new SlashCommandBuilder().setName('profile').setDescription('Mostra suas estatísticas de vitórias/derrotas')
 ].map(c => c.toJSON());
@@ -155,34 +162,43 @@ client.on('interactionCreate', async interaction => {
 
   /* ---------- X1 RESULT ---------- */
   if (interaction.commandName === 'x1_result') {
-    const vencedor = interaction.options.getUser('vencedor');
-    const perdedor = interaction.options.getUser('perdedor');
-    const valor = interaction.options.getNumber('valor');
+    try {
+      const vencedor = interaction.options.getUser('vencedor');
+      const perdedor = interaction.options.getUser('perdedor');
+      const valor = interaction.options.getNumber('valor');
 
-    if (vencedor.id === perdedor.id) {
-      return interaction.reply({ content: '❌ O vencedor e o perdedor não podem ser a mesma pessoa!', ephemeral: true });
+      if (!vencedor || !perdedor || !valor) {
+        return interaction.reply({ content: '❌ Preencha todos os campos corretamente!', ephemeral: true });
+      }
+
+      if (vencedor.id === perdedor.id) {
+        return interaction.reply({ content: '❌ O vencedor e o perdedor não podem ser a mesma pessoa!', ephemeral: true });
+      }
+
+      const total = valor * 2;
+
+      const embed = new EmbedBuilder()
+        .setTitle('🎮 Resultado X1')
+        .setDescription(`${vencedor.username} ganhou do ${perdedor.username}\n💰 Dinheiro total apostado: ${total} yens`)
+        .setColor(0x00ff99)
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+      await log(`X1 registrado → ${vencedor.username} venceu ${perdedor.username}, total apostado: ${total} yens`);
+    } catch (err) {
+      console.error(err);
+      await interaction.reply({ content: '❌ Ocorreu um erro ao registrar o resultado.', ephemeral: true });
     }
-
-    const total = valor * 2;
-
-    const embed = new EmbedBuilder()
-      .setTitle('🎮 Resultado X1')
-      .setDescription(`${vencedor.username} ganhou do ${perdedor.username}\n💰 Dinheiro total apostado: ${total} yens`)
-      .setColor(0x00ff99)
-      .setTimestamp();
-
-    await interaction.reply({ embeds: [embed] });
-    await log(`X1 registrado → ${vencedor.username} venceu ${perdedor.username}, total apostado: ${total} yens`);
   }
 
   /* ---------- RANK ---------- */
   if (interaction.commandName === 'rank') {
-    // seu código de ranking visual, se quiser
+    // ranking visual opcional
   }
 
   /* ---------- PROFILE ---------- */
   if (interaction.commandName === 'profile') {
-    // seu código de profile visual, se quiser
+    // profile visual opcional
   }
 });
 
