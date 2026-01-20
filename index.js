@@ -1,6 +1,6 @@
 /**
- * ARENA BETS — WORK SYSTEM + X1 RESULTADO SIMPLIFICADO
- * Versão Profissional Atualizada (sem utils.js)
+ * ARENA BETS — WORK SYSTEM + X1 RESULTADO COMPLETO
+ * Versão Profissional Atualizada
  */
 
 require('dotenv').config();
@@ -26,6 +26,7 @@ const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 const TZ = process.env.TZ || 'America/Sao_Paulo';
 const STATE_FILE = path.join(__dirname, 'arena_state.json');
+const RANK_FILE = path.join(__dirname, 'ranking.json');
 
 /* ================= CLIENT ================= */
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -36,6 +37,35 @@ async function readState() {
   try { return JSON.parse(await fs.readFile(STATE_FILE, 'utf8')); } catch { return { override: null }; }
 }
 async function saveState(state) { await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2)); }
+
+/* ================= RANKING ================= */
+async function loadRanking() {
+  try { return JSON.parse(await fs.readFile(RANK_FILE, 'utf8')); } catch { return { players: {} }; }
+}
+async function saveRanking(ranking) {
+  await fs.writeFile(RANK_FILE, JSON.stringify(ranking, null, 2));
+}
+async function recordMatch(winner, loser, valor) {
+  const ranking = await loadRanking();
+  if (!ranking.players[winner.id]) ranking.players[winner.id] = { name: winner.username, wins: 0, losses: 0, streak: 0, games: 0 };
+  if (!ranking.players[loser.id]) ranking.players[loser.id] = { name: loser.username, wins: 0, losses: 0, streak: 0, games: 0 };
+
+  // Atualiza vencedor
+  ranking.players[winner.id].wins += 1;
+  ranking.players[winner.id].streak += 1;
+  ranking.players[winner.id].games += 1;
+
+  // Atualiza perdedor
+  ranking.players[loser.id].losses += 1;
+  ranking.players[loser.id].streak = 0;
+  ranking.players[loser.id].games += 1;
+
+  await saveRanking(ranking);
+}
+async function getLeaderboard() {
+  const ranking = await loadRanking();
+  return Object.values(ranking.players).sort((a,b) => b.wins - a.wins).slice(0,10);
+}
 
 /* ================= TIME LOGIC ================= */
 function workIsOpen(state) {
@@ -171,11 +201,16 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: '❌ Preencha todos os campos corretamente!', ephemeral: true });
       }
 
+      if (valor <= 0) {
+        return interaction.reply({ content: '❌ O valor da aposta deve ser maior que 0!', ephemeral: true });
+      }
+
       if (vencedor.id === perdedor.id) {
         return interaction.reply({ content: '❌ O vencedor e o perdedor não podem ser a mesma pessoa!', ephemeral: true });
       }
 
       const total = valor * 2;
+      await recordMatch(vencedor, perdedor, valor);
 
       const embed = new EmbedBuilder()
         .setTitle('🎮 Resultado X1')
@@ -193,12 +228,37 @@ client.on('interactionCreate', async interaction => {
 
   /* ---------- RANK ---------- */
   if (interaction.commandName === 'rank') {
-    // ranking visual opcional
+    const leaderboard = await getLeaderboard();
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 Ranking Top 10')
+      .setColor(0xffcc00)
+      .setTimestamp();
+
+    if (leaderboard.length === 0) embed.setDescription('Nenhum jogador registrado ainda.');
+    else {
+      let desc = '';
+      leaderboard.forEach((p, i) => {
+        desc += `**${i + 1}. ${p.name}** - Vitórias: ${p.wins} - Derrotas: ${p.losses} - Streak: ${p.streak}\n`;
+      });
+      embed.setDescription(desc);
+    }
+    await interaction.reply({ embeds: [embed] });
   }
 
   /* ---------- PROFILE ---------- */
   if (interaction.commandName === 'profile') {
-    // profile visual opcional
+    const ranking = await loadRanking();
+    const player = ranking.players[interaction.user.id];
+
+    if (!player) return interaction.reply({ content: 'Você ainda não tem nenhuma partida registrada.', ephemeral: true });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📊 Perfil de ${player.name}`)
+      .setDescription(`Vitórias: ${player.wins}\nDerrotas: ${player.losses}\nStreak atual: ${player.streak}\nPartidas jogadas: ${player.games}`)
+      .setColor(0x00ccff)
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed], ephemeral: true });
   }
 });
 
