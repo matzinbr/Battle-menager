@@ -1,137 +1,203 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, Routes } = require('discord.js');
-const { REST } = require('@discordjs/rest');
-const ranking = require('./ranking');
+const {
+  Client,
+  GatewayIntentBits,
+  SlashCommandBuilder,
+  Routes,
+  REST
+} = require("discord.js");
+const fs = require("fs");
+
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+
+const FUNDADOR_ROLE = "1463413721970769973";
+const SUKUNA_ROLE = "1463413152824819753";
+const HONORED_ROLE = "1463413249734086860";
+
+const SUKUNA_ITEM = "sukuna_finger";
+const GOKUMON_ITEM = "gokumonkyo";
+
+const DATA_FILE = "./database.json";
+
+/* ================== DATABASE ================== */
+
+if (!fs.existsSync(DATA_FILE)) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify({ users: {} }, null, 2));
+}
+
+function loadDB() {
+  return JSON.parse(fs.readFileSync(DATA_FILE));
+}
+
+function saveDB(db) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
+}
+
+function getUser(db, id) {
+  if (!db.users[id]) {
+    db.users[id] = {
+      wallet: 600,
+      bank: 0,
+      inventory: {
+        sukuna_finger: 0,
+        gokumonkyo: 0
+      },
+      lastWork: 0,
+      streak: 0
+    };
+  }
+  return db.users[id];
+}
+
+/* ================== CLIENT ================== */
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
+/* ================== COMMANDS ================== */
 
-/* ================= COMMANDS ================= */
 const commands = [
   new SlashCommandBuilder()
-    .setName('profile')
-    .setDescription('Ver seu perfil e estatísticas'),
+    .setName("shenanigans_bet")
+    .setDescription("Trabalhe e enfrente eventos caóticos"),
 
   new SlashCommandBuilder()
-    .setName('trade')
-    .setDescription('Trocar itens colecionáveis por títulos')
-    .addStringOption(opt =>
-      opt
-        .setName('item')
-        .setDescription('Item para trocar')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Sukuna Finger', value: 'sukuna' },
-          { name: 'Gokumonkyō', value: 'gokumonkyo' }
-        )
+    .setName("balance")
+    .setDescription("Veja seu saldo"),
+
+  new SlashCommandBuilder()
+    .setName("deposit")
+    .setDescription("Depositar dinheiro no banco")
+    .addIntegerOption(o =>
+      o.setName("valor").setDescription("Valor").setRequired(true)
     ),
 
   new SlashCommandBuilder()
-    .setName('shenanigans_bet')
-    .setDescription('Apostar yens no evento Shenanigans'),
+    .setName("withdraw")
+    .setDescription("Sacar dinheiro do banco")
+    .addIntegerOption(o =>
+      o.setName("valor").setDescription("Valor").setRequired(true)
+    ),
 
   new SlashCommandBuilder()
-    .setName('bank')
-    .setDescription('Ver saldo da carteira e do banco'),
-
-  new SlashCommandBuilder()
-    .setName('withdraw')
-    .setDescription('Sacar dinheiro do banco')
-    .addIntegerOption(opt =>
-      opt
-        .setName('valor')
-        .setDescription('Valor para sacar')
-        .setRequired(true)
-    )
+    .setName("inventory")
+    .setDescription("Ver seu inventário")
 ];
 
-/* ================= REGISTER ================= */
-const rest = new REST({ version: '10' }).setToken(TOKEN);
+/* ================== REGISTER ================== */
+
+const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 (async () => {
-  try {
-    console.log('⏳ Registrando comandos...');
-    await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
-      { body: commands.map(cmd => cmd.toJSON()) }
-    );
-    console.log('✅ Comandos registrados!');
-  } catch (err) {
-    console.error('❌ Erro ao registrar comandos:', err);
-  }
+  await rest.put(Routes.applicationCommands(CLIENT_ID), {
+    body: commands.map(c => c.toJSON())
+  });
+  console.log("✅ Comandos registrados");
 })();
 
-/* ================= INTERACTIONS ================= */
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+/* ================== EVENTS ================== */
 
-  if (interaction.commandName === 'profile') {
-    const profile = await ranking.getProfile(interaction.user.id);
-    if (!profile) {
-      return interaction.reply('Você ainda não possui perfil.');
-    }
-
-    return interaction.reply(
-      `👤 **${profile.name}**
-🏆 Vitórias: ${profile.wins}
-💀 Derrotas: ${profile.losses}
-🔥 Streak: ${profile.streak}
-💰 Carteira: ${profile.wallet} yens
-🏦 Banco: ${profile.bank} yens`
-    );
-  }
-
-  if (interaction.commandName === 'trade') {
-    const item = interaction.options.getString('item');
-    const result = await ranking.tradeItem(interaction.user.id, item);
-
-    if (!result.success) {
-      return interaction.reply(result.message);
-    }
-
-    const role = interaction.guild.roles.cache.get(result.reward.roleId);
-    if (role) {
-      await interaction.member.roles.add(role);
-    }
-
-    return interaction.reply('✅ Troca realizada com sucesso!');
-  }
-
-  if (interaction.commandName === 'bank') {
-    const profile = await ranking.getProfile(interaction.user.id);
-    if (!profile) return interaction.reply('Perfil não encontrado.');
-
-    return interaction.reply(
-      `💰 Carteira: ${profile.wallet} yens\n🏦 Banco: ${profile.bank} yens`
-    );
-  }
-
-  if (interaction.commandName === 'withdraw') {
-    const valor = interaction.options.getInteger('valor');
-    const profile = await ranking.getProfile(interaction.user.id);
-
-    if (!profile || profile.bank < valor) {
-      return interaction.reply('Saldo insuficiente.');
-    }
-
-    profile.bank -= valor;
-    profile.wallet += valor;
-    await ranking.saveRanking({ players: { [interaction.user.id]: profile } });
-
-    return interaction.reply(`✅ Você sacou ${valor} yens.`);
-  }
-
-  if (interaction.commandName === 'shenanigans_bet') {
-    return interaction.reply('🎲 Aposta registrada!');
-  }
+client.once("ready", () => {
+  console.log(`🤖 Online como ${client.user.tag}`);
 });
 
-/* ================= READY ================= */
-client.once('ready', () => {
-  console.log(`✅ Bot online: ${client.user.tag}`);
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const db = loadDB();
+  const user = getUser(db, interaction.user.id);
+
+  /* ===== BALANCE ===== */
+  if (interaction.commandName === "balance") {
+    return interaction.reply(
+      `💴 Carteira: **${user.wallet} yens**\n🏦 Banco: **${user.bank} yens**`
+    );
+  }
+
+  /* ===== DEPOSIT ===== */
+  if (interaction.commandName === "deposit") {
+    const valor = interaction.options.getInteger("valor");
+    if (valor <= 0 || valor > user.wallet)
+      return interaction.reply({ content: "❌ Valor inválido.", ephemeral: true });
+
+    user.wallet -= valor;
+    user.bank += valor;
+    saveDB(db);
+
+    return interaction.reply(`🏦 Depositado **${valor} yens**`);
+  }
+
+  /* ===== WITHDRAW ===== */
+  if (interaction.commandName === "withdraw") {
+    const valor = interaction.options.getInteger("valor");
+    if (valor <= 0 || valor > user.bank)
+      return interaction.reply({ content: "❌ Valor inválido.", ephemeral: true });
+
+    user.bank -= valor;
+    user.wallet += valor;
+    saveDB(db);
+
+    return interaction.reply(`💴 Sacado **${valor} yens**`);
+  }
+
+  /* ===== INVENTORY ===== */
+  if (interaction.commandName === "inventory") {
+    return interaction.reply(
+      `🎒 **Inventário**\n` +
+      `🩸 Sukuna Finger: ${user.inventory.sukuna_finger}\n` +
+      `🗝️ Gokumonkyo: ${user.inventory.gokumonkyo}`
+    );
+  }
+
+  /* ===== SHENANIGANS BET ===== */
+  if (interaction.commandName === "shenanigans_bet") {
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+
+    if (now - user.lastWork < day)
+      return interaction.reply({ content: "⏳ Você já usou hoje.", ephemeral: true });
+
+    user.lastWork = now;
+    user.streak++;
+
+    let ganho = Math.floor(Math.random() * 200) + 100;
+
+    // streak bônus
+    if (user.streak >= 3) ganho += 100;
+
+    // desastre (20%)
+    if (Math.random() < 0.2) {
+      user.wallet = Math.max(0, user.wallet - 150);
+      user.streak = 0;
+      saveDB(db);
+      return interaction.reply("💥 **DESASTRE!** Você perdeu 150 yens.");
+    }
+
+    // itens
+    if (Math.random() < 0.1) user.inventory.sukuna_finger++;
+    if (Math.random() < 0.05) user.inventory.gokumonkyo++;
+
+    user.wallet += ganho;
+
+    /* ===== ROLES ===== */
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+
+    if (user.inventory.sukuna_finger >= 2)
+      await member.roles.add(SUKUNA_ROLE).catch(() => {});
+
+    if (user.inventory.gokumonkyo >= 3)
+      await member.roles.add(HONORED_ROLE).catch(() => {});
+
+    if (member.roles.cache.has(FUNDADOR_ROLE))
+      ganho += 100;
+
+    saveDB(db);
+
+    return interaction.reply(
+      `🎲 Você ganhou **${ganho} yens**!\n🔥 Streak: ${user.streak}`
+    );
+  }
 });
 
 client.login(TOKEN);
