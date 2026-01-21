@@ -10,13 +10,14 @@ async function loadRanking() {
     return JSON.parse(data);
   } catch {
     return { players: {} };
+  }
 }
 
 async function saveRanking(ranking) {
   await fs.writeFile(RANK_FILE, JSON.stringify(ranking, null, 2));
 }
 
-/* ================= ENSURE PLAYER ================= */
+/* ================= PLAYER BASE ================= */
 function createPlayer(username) {
   return {
     name: username,
@@ -33,12 +34,13 @@ function createPlayer(username) {
 }
 
 /* ================= X1 ================= */
-async function recordMatch(winner, loser, value) {
+async function recordMatch(winner, loser) {
   const ranking = await loadRanking();
 
   if (!ranking.players[winner.id]) {
     ranking.players[winner.id] = createPlayer(winner.username);
   }
+
   if (!ranking.players[loser.id]) {
     ranking.players[loser.id] = createPlayer(loser.username);
   }
@@ -86,7 +88,6 @@ async function tradeItem(userId, item) {
     return {
       success: true,
       reward: {
-        title: 'Disgraceful King',
         roleId: '1463413152824819753'
       }
     };
@@ -103,7 +104,6 @@ async function tradeItem(userId, item) {
     return {
       success: true,
       reward: {
-        title: 'The Honored One',
         roleId: '1463413249734086860'
       }
     };
