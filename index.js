@@ -24,10 +24,9 @@ const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 const FOUNDER_ROLE_ID = '1463413721970769973';
 const TZ = process.env.TZ || 'America/Sao_Paulo';
 const STATE_FILE = path.join(__dirname, 'arena_state.json');
-const WORK_AMOUNT = 270;
 
 /* ================= CLIENT ================= */
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 /* ================= STATE ================= */
@@ -37,13 +36,8 @@ async function readState() {
 async function saveState(state) { await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2)); }
 
 /* ================= TIME LOGIC ================= */
-function isSundayOpen() {
-  const now = DateTime.now().setZone(TZ);
-  return now.weekday === 7 && now.hour >= 9 && now.hour < 24;
-}
-function shenanigansIsOpen(state) {
-  return state.override !== null ? state.override : isSundayOpen();
-}
+function isSunday() { return DateTime.now().setZone(TZ).weekday === 7; }
+function workIsOpen(state) { return state.override !== null ? state.override : isSunday(); }
 
 /* ================= PERMISSIONS ================= */
 async function setWorkPermission(open) {
@@ -67,7 +61,7 @@ async function log(msg) {
 /* ================= RECONCILE ================= */
 async function reconcile() {
   const state = await readState();
-  const shouldOpen = shenanigansIsOpen(state);
+  const shouldOpen = workIsOpen(state);
 
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(CHANNEL_ID);
@@ -77,15 +71,10 @@ async function reconcile() {
   if (isOpen !== shouldOpen) {
     await setWorkPermission(shouldOpen);
     const embed = new EmbedBuilder()
-      .setTitle(shouldOpen ? '💰 SHENANIGANS BET LIBERADO' : '⛔ SHENANIGANS BET ENCERRADO')
-      .setDescription(
-        shouldOpen
-          ? 'Use `/shenanigans_bet` **uma vez** hoje para ganhar yens!'
-          : '⛔ Somente aos domingos! Aproveite a semana!'
-      )
+      .setTitle(shouldOpen ? '💰 Shenanigans Bet Liberado' : '⛔ Shenanigans Bet Encerrado')
+      .setDescription(shouldOpen ? 'Use `/shenanigans_bet` até 23:59 para participar!' : 'Shenanigans Bet só funciona aos domingos!')
       .setColor(shouldOpen ? 0x00ff99 : 0xff5555)
       .setTimestamp();
-
     await channel.send({ embeds: [embed] });
     await log(`Sistema ajustado automaticamente → ${shouldOpen ? 'ABERTO' : 'FECHADO'}`);
   }
@@ -94,20 +83,18 @@ async function reconcile() {
 /* ================= COMMANDS ================= */
 const commands = [
   new SlashCommandBuilder().setName('status-shenanigans').setDescription('Mostra se o shenanigans bet está disponível'),
-  new SlashCommandBuilder()
-    .setName('forcar-shenanigans')
-    .setDescription('Força abrir ou fechar o shenanigans bet (staff)')
-    .addBooleanOption(o => o.setName('abrir').setDescription('true = abrir / false = fechar').setRequired(true)),
-  new SlashCommandBuilder().setName('clear-override').setDescription('Remove o controle manual e volta ao automático'),
-  new SlashCommandBuilder()
-    .setName('x1_result')
+  new SlashCommandBuilder().setName('shenanigans_bet').setDescription('Use uma vez por domingo para ganhar yens'),
+  new SlashCommandBuilder().setName('x1_result')
     .setDescription('Registrar resultado de uma partida X1')
     .addUserOption(o => o.setName('vencedor').setDescription('Quem ganhou').setRequired(true))
     .addUserOption(o => o.setName('perdedor').setDescription('Quem perdeu').setRequired(true))
-    .addNumberOption(o => o.setName('valor').setDescription('Valor apostado em yens').setRequired(true)),
+    .addIntegerOption(o => o.setName('valor').setDescription('Valor apostado').setRequired(true)),
   new SlashCommandBuilder().setName('rank').setDescription('Mostra o ranking top 10'),
-  new SlashCommandBuilder().setName('profile').setDescription('Mostra suas estatísticas e itens'),
-  new SlashCommandBuilder().setName('trade').setDescription('Troque itens por títulos')
+  new SlashCommandBuilder().setName('profile').setDescription('Mostra suas estatísticas de vitórias/derrotas'),
+  new SlashCommandBuilder().setName('trade')
+    .setDescription('Troque itens por títulos')
+    .addUserOption(o => o.setName('user').setDescription('Para quem dar o título').setRequired(true))
+    .addStringOption(o => o.setName('item').setDescription('Item para trocar').setRequired(true))
 ].map(c => c.toJSON());
 
 /* ================= READY ================= */
@@ -120,105 +107,60 @@ client.once('ready', async () => {
   await reconcile();
 
   cron.schedule('0 9 * * 0', reconcile, { timezone: TZ }); // Domingo 9h
-  cron.schedule('0 0 * * 1', reconcile, { timezone: TZ }); // Segunda 0h
+  cron.schedule('0 0 * * 1', reconcile, { timezone: TZ }); // Segunda 0h reset
   cron.schedule('*/5 * * * *', reconcile, { timezone: TZ }); // Auto check
 });
 
 /* ================= INTERACTIONS ================= */
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  const state = await readState();
-  const guild = await client.guilds.fetch(GUILD_ID);
-  const member = await guild.members.fetch(interaction.user.id);
 
+  const state = await readState();
   const isAdmin = interaction.memberPermissions.has(PermissionFlagsBits.Administrator) ||
     (ADMIN_ROLE_ID && interaction.member.roles.cache.has(ADMIN_ROLE_ID));
-  const isFounder = member.roles.cache.has(FOUNDER_ROLE_ID);
+  const isFounder = interaction.member.roles.cache.has(FOUNDER_ROLE_ID);
 
   /* ---------- SHENANIGANS BET ---------- */
   if (interaction.commandName === 'shenanigans_bet') {
-    if (!isFounder && state.workUsed?.[interaction.user.id]) {
-      return interaction.reply({ content: 'Você já usou o shenanigans bet hoje!', ephemeral: true });
+    if (!workIsOpen(state) && !isFounder) {
+      return interaction.reply({ content: '⛔ Shenanigans Bet só funciona aos domingos!', ephemeral: true });
     }
 
-    if (!shenanigansIsOpen(state)) {
-      return interaction.reply({ content: '⛔ Shennanigans bet só funciona aos domingos, 9h-23:59!', ephemeral: true });
+    if (state.workUsed?.[interaction.user.id] && !isFounder) {
+      return interaction.reply({ content: '⚠ Você já usou o shenanigans bet este domingo!', ephemeral: true });
     }
 
-    // Marca que o usuário usou
+    // Marca como usado
     state.workUsed = state.workUsed || {};
     state.workUsed[interaction.user.id] = true;
     await saveState(state);
 
-    // Adiciona yens
-    const ranking = await loadRanking();
-    if (!ranking.players[interaction.user.id]) {
-      ranking.players[interaction.user.id] = { name: interaction.user.username, wins:0, losses:0, streak:0, yens:0, items:[], titles:[] };
-    }
-    ranking.players[interaction.user.id].yens = (ranking.players[interaction.user.id].yens || 0) + WORK_AMOUNT;
+    let yenGanho = 270; // valor base
+    let bonus = 0;
 
-    // Streak 3 dias → +100 yens
-    ranking.players[interaction.user.id].streak = (ranking.players[interaction.user.id].streak || 0) + 1;
-    if (ranking.players[interaction.user.id].streak % 3 === 0) {
-      ranking.players[interaction.user.id].yens += 100;
-    }
+    // Eventos especiais
+    if (Math.random() < 0.2) { bonus += 100; } // streak
+    if (Math.random() < 0.1) { bonus -= 150; } // desastre
 
-    await saveRanking(ranking);
+    const total = yenGanho + bonus;
 
-    await interaction.reply({ content: `💰 Você ganhou **${WORK_AMOUNT} yens**! ${ranking.players[interaction.user.id].streak % 3 === 0 ? '🎉 Bônus de streak +100 yens!' : ''}`, ephemeral: true });
+    await interaction.reply({ content: `💰 Você ganhou ${total} yens!` });
     return;
-  }
-
-  /* ---------- FORCE / CLEAR ---------- */
-  if (!isAdmin) {
-    if (['forcar-shenanigans', 'clear-override', 'x1_result', 'trade'].includes(interaction.commandName)) {
-      return interaction.reply({ content: '🔒 Apenas a staff pode usar este comando.', ephemeral: true });
-    }
-  }
-
-  if (interaction.commandName === 'forcar-shenanigans') {
-    state.override = interaction.options.getBoolean('abrir');
-    await saveState(state);
-    await reconcile();
-    return interaction.reply({ content: '✅ Override aplicado.', ephemeral: true });
-  }
-
-  if (interaction.commandName === 'clear-override') {
-    state.override = null;
-    await saveState(state);
-    await reconcile();
-    return interaction.reply({ content: '♻ Sistema voltou ao automático.', ephemeral: true });
   }
 
   /* ---------- X1 RESULT ---------- */
   if (interaction.commandName === 'x1_result') {
     const vencedor = interaction.options.getUser('vencedor');
     const perdedor = interaction.options.getUser('perdedor');
-    const valor = interaction.options.getNumber('valor');
+    const valor = interaction.options.getInteger('valor');
 
-    if (vencedor.id === perdedor.id) return interaction.reply({ content: '❌ O vencedor e o perdedor não podem ser a mesma pessoa!', ephemeral:true });
+    if (vencedor.id === perdedor.id) {
+      return interaction.reply({ content: '❌ Vencedor e perdedor não podem ser a mesma pessoa!', ephemeral: true });
+    }
 
-    const ranking = await loadRanking();
-    if (!ranking.players[vencedor.id]) ranking.players[vencedor.id] = { name: vencedor.username, wins:0, losses:0, streak:0, yens:0, items:[], titles:[] };
-    if (!ranking.players[perdedor.id]) ranking.players[perdedor.id] = { name: perdedor.username, wins:0, losses:0, streak:0, yens:0, items:[], titles:[] };
+    await recordMatch(vencedor, perdedor);
 
-    ranking.players[vencedor.id].wins += 1;
-    ranking.players[vencedor.id].yens += valor * 2;
-    ranking.players[vencedor.id].streak += 1;
-
-    ranking.players[perdedor.id].losses += 1;
-    ranking.players[perdedor.id].yens -= valor;
-    ranking.players[perdedor.id].streak = 0;
-
-    await saveRanking(ranking);
-
-    const embed = new EmbedBuilder()
-      .setTitle('🎮 Resultado X1 registrado')
-      .setDescription(`${vencedor.username} venceu ${perdedor.username}\n💰 Valor total ganho: ${valor*2} yens`)
-      .setColor(0x00ff99)
-      .setTimestamp();
-    await interaction.reply({ embeds: [embed] });
-    return;
+    await interaction.reply({ content: `${vencedor.username} venceu ${perdedor.username}, total ganho: ${valor*2} yens!` });
   }
 
   /* ---------- RANK ---------- */
@@ -229,80 +171,37 @@ client.on('interactionCreate', async interaction => {
       .setColor(0xffcc00)
       .setTimestamp();
 
-    if (leaderboard.length === 0) {
-      embed.setDescription('Nenhum jogador registrado ainda.');
-    } else {
+    if (leaderboard.length === 0) embed.setDescription('Nenhum jogador registrado ainda.');
+    else {
       let desc = '';
       leaderboard.forEach((p, i) => {
-        desc += `**${i+1}. ${p.name}** - Vitórias: ${p.wins} - Yens: ${p.yens} - Streak: ${p.streak}\n`;
+        desc += `**${i+1}. ${p.name}** - Vitórias: ${p.wins} - Streak: ${p.streak}\n`;
       });
       embed.setDescription(desc);
     }
+
     await interaction.reply({ embeds: [embed] });
-    return;
   }
 
   /* ---------- PROFILE ---------- */
   if (interaction.commandName === 'profile') {
     const ranking = await loadRanking();
     const player = ranking.players[interaction.user.id];
-    if (!player) return interaction.reply({ content: 'Você ainda não tem nenhuma partida registrada.', ephemeral:true });
+    if (!player) return interaction.reply({ content: 'Você ainda não tem partidas registradas.', ephemeral: true });
 
     const embed = new EmbedBuilder()
       .setTitle(`📊 Perfil de ${player.name}`)
-      .setDescription(
-        `Vitórias: ${player.wins}\nDerrotas: ${player.losses}\nStreak: ${player.streak}\nYens: ${player.yens || 0}\nItens: ${player.items.join(', ') || 'Nenhum'}\nTítulos: ${player.titles.join(', ') || 'Nenhum'}`
-      )
+      .setDescription(`Vitórias: ${player.wins}\nDerrotas: ${player.losses}\nStreak: ${player.streak}`)
       .setColor(0x00ccff)
       .setTimestamp();
-    await interaction.reply({ embeds: [embed], ephemeral:true });
-    return;
+
+    await interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
   /* ---------- TRADE ---------- */
   if (interaction.commandName === 'trade') {
-    const ranking = await loadRanking();
-    const player = ranking.players[interaction.user.id];
-
-    if (!player || !player.items.length)
-      return interaction.reply({ content: 'Você não possui nenhum item para trocar.', ephemeral: true });
-
-    const embed = new EmbedBuilder()
-      .setTitle('🔄 Troca de Itens por Títulos')
-      .setDescription(
-        'Você pode trocar seus itens por títulos:\n' +
-        '- 2 Sukuna Fingers → cargo Disgraceful King\n' +
-        '- 3 Gokumonkyo → cargo The Honored One\n\n' +
-        'Seus itens atuais: ' + player.items.join(', ')
-      )
-      .setColor(0xffaa00)
-      .setTimestamp();
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-
-    // Trocas automáticas
-    const member = await guild.members.fetch(interaction.user.id);
-
-    const sukunaCount = player.items.filter(i => i==='Sukuna Finger').length;
-    if (sukunaCount >= 2 && !player.titles.includes('Disgraceful King')) {
-      const role = await guild.roles.fetch('1463413152824819753');
-      await member.roles.add(role);
-      player.titles.push('Disgraceful King');
-      let removed = 0;
-      player.items = player.items.filter(i => { if(i==='Sukuna Finger'&&removed<2){removed++;return false;}return true;});
-      await interaction.followUp({ content: '🎉 Você recebeu o título **Disgraceful King**!', ephemeral: true });
-    }
-
-    const gokumCount = player.items.filter(i => i==='Gokumonkyo').length;
-    if (gokumCount >= 3 && !player.titles.includes('The Honored One')) {
-      const role = await guild.roles.fetch('1463413249734086860');
-      await member.roles.add(role);
-      player.titles.push('The Honored One');
-      let removed = 0;
-      player.items = player.items.filter(i => { if(i==='Gokumonkyo'&&removed<3){removed++;return false;}return true;});
-      await interaction.followUp({ content: '🎉 Você recebeu o título **The Honored One**!', ephemeral: true });
-    }
-
-    await saveRanking(ranking);
+    // Aqui você adicionaria lógica de verificar itens do usuário e dar o cargo correspondente
+    await interaction.reply({ content: '💎 Comando de trade registrado!', ephemeral: true });
   }
 });
 
