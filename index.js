@@ -225,5 +225,53 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
+/* ================= WORK COM YENS ================= */
+const WORK_REWARD = 500; // Yens por uso
+
+const workCooldown = new Map(); // Para evitar spam
+const WORK_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutos
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  // ----- COMANDO /work -----
+  if (interaction.commandName === 'work') {
+    const state = await readState();
+    const now = DateTime.now().setZone(TZ);
+
+    // Verifica se é domingo
+    if (now.weekday !== 7) {
+      return interaction.reply({ content: '⛔ O WORK só funciona aos domingos!', ephemeral: true });
+    }
+
+    // Checa cooldown
+    const lastTime = workCooldown.get(interaction.user.id) || 0;
+    const diff = Date.now() - lastTime;
+    if (diff < WORK_COOLDOWN_MS) {
+      const wait = Math.ceil((WORK_COOLDOWN_MS - diff) / 60000);
+      return interaction.reply({ content: `⏱ Aguarde ${wait} minutos antes de usar o /work novamente.`, ephemeral: true });
+    }
+
+    workCooldown.set(interaction.user.id, Date.now());
+
+    // Adiciona Yens
+    const ranking = await loadRanking();
+    if (!ranking.players[interaction.user.id]) {
+      ranking.players[interaction.user.id] = { name: interaction.user.username, wins: 0, losses: 0, streak: 0, yens: 0 };
+    }
+    ranking.players[interaction.user.id].yens = (ranking.players[interaction.user.id].yens || 0) + WORK_REWARD;
+    await fs.writeFile('./ranking.json', JSON.stringify(ranking, null, 2));
+
+    // Resposta
+    const embed = new EmbedBuilder()
+      .setTitle('💼 WORK realizado!')
+      .setDescription(`${interaction.user.username} recebeu ${WORK_REWARD} ${CURRENCY_EMOJI}`)
+      .setColor(0x00ff99)
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+  }
+});
+
 /* ================= LOGIN ================= */
 client.login(TOKEN);
