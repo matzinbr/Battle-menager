@@ -1,203 +1,174 @@
+require('dotenv').config();
 const {
   Client,
   GatewayIntentBits,
-  SlashCommandBuilder,
+  REST,
   Routes,
-  REST
-} = require("discord.js");
-const fs = require("fs");
+  SlashCommandBuilder
+} = require('discord.js');
+const fs = require('fs');
 
 const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_ID = '1463220420818763787';
+const GUILD_ID = '1461942839331127520';
 
-const FUNDADOR_ROLE = "1463413721970769973";
-const SUKUNA_ROLE = "1463413152824819753";
-const HONORED_ROLE = "1463413249734086860";
-
-const SUKUNA_ITEM = "sukuna_finger";
-const GOKUMON_ITEM = "gokumonkyo";
-
-const DATA_FILE = "./database.json";
-
-/* ================== DATABASE ================== */
-
-if (!fs.existsSync(DATA_FILE)) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify({ users: {} }, null, 2));
-}
-
-function loadDB() {
-  return JSON.parse(fs.readFileSync(DATA_FILE));
-}
-
-function saveDB(db) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
-}
-
-function getUser(db, id) {
-  if (!db.users[id]) {
-    db.users[id] = {
-      wallet: 600,
-      bank: 0,
-      inventory: {
-        sukuna_finger: 0,
-        gokumonkyo: 0
-      },
-      lastWork: 0,
-      streak: 0
-    };
-  }
-  return db.users[id];
-}
-
-/* ================== CLIENT ================== */
-
+// ======================
+// CLIENT
+// ======================
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-/* ================== COMMANDS ================== */
+// ======================
+// FILES
+// ======================
+const ECON_FILE = './economy.json';
+const INV_FILE = './inventory.json';
 
+function loadJSON(path, def) {
+  if (!fs.existsSync(path)) {
+    fs.writeFileSync(path, JSON.stringify(def, null, 2));
+    return def;
+  }
+  return JSON.parse(fs.readFileSync(path));
+}
+
+function saveJSON(path, data) {
+  fs.writeFileSync(path, JSON.stringify(data, null, 2));
+}
+
+// ======================
+// SLASH COMMANDS
+// ======================
 const commands = [
   new SlashCommandBuilder()
-    .setName("shenanigans_bet")
-    .setDescription("Trabalhe e enfrente eventos caóticos"),
+    .setName('balance')
+    .setDescription('Ver seu saldo de yens'),
 
   new SlashCommandBuilder()
-    .setName("balance")
-    .setDescription("Veja seu saldo"),
-
-  new SlashCommandBuilder()
-    .setName("deposit")
-    .setDescription("Depositar dinheiro no banco")
+    .setName('deposit')
+    .setDescription('Depositar yens no banco')
     .addIntegerOption(o =>
-      o.setName("valor").setDescription("Valor").setRequired(true)
+      o.setName('valor').setDescription('Valor').setRequired(true)
     ),
 
   new SlashCommandBuilder()
-    .setName("withdraw")
-    .setDescription("Sacar dinheiro do banco")
+    .setName('withdraw')
+    .setDescription('Sacar yens do banco')
     .addIntegerOption(o =>
-      o.setName("valor").setDescription("Valor").setRequired(true)
+      o.setName('valor').setDescription('Valor').setRequired(true)
     ),
 
   new SlashCommandBuilder()
-    .setName("inventory")
-    .setDescription("Ver seu inventário")
+    .setName('inventory')
+    .setDescription('Ver seu inventário'),
+
+  new SlashCommandBuilder()
+    .setName('shenanigans_bet')
+    .setDescription('Trabalhos duvidosos (apenas domingo, 1x por dia)')
 ];
 
-/* ================== REGISTER ================== */
-
-const rest = new REST({ version: "10" }).setToken(TOKEN);
+// ======================
+// REGISTER COMMANDS
+// ======================
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
-  await rest.put(Routes.applicationCommands(CLIENT_ID), {
-    body: commands.map(c => c.toJSON())
-  });
-  console.log("✅ Comandos registrados");
+  try {
+    console.log('🔄 Registrando comandos...');
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands.map(c => c.toJSON()) }
+    );
+    console.log('✅ Comandos registrados com sucesso!');
+  } catch (e) {
+    console.error('❌ Erro ao registrar comandos:', e);
+  }
 })();
 
-/* ================== EVENTS ================== */
-
-client.once("ready", () => {
-  console.log(`🤖 Online como ${client.user.tag}`);
+// ======================
+// READY
+// ======================
+client.once('ready', () => {
+  console.log(`✅ Bot online: ${client.user.tag}`);
 });
 
-client.on("interactionCreate", async interaction => {
+// ======================
+// INTERACTIONS
+// ======================
+client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const db = loadDB();
-  const user = getUser(db, interaction.user.id);
+  const econ = loadJSON(ECON_FILE, {});
+  const inv = loadJSON(INV_FILE, {});
+  const id = interaction.user.id;
 
-  /* ===== BALANCE ===== */
-  if (interaction.commandName === "balance") {
+  if (!econ[id]) econ[id] = { wallet: 600, bank: 0, lastWork: null };
+  if (!inv[id]) inv[id] = { items: {} };
+
+  // ===== BALANCE =====
+  if (interaction.commandName === 'balance') {
     return interaction.reply(
-      `💴 Carteira: **${user.wallet} yens**\n🏦 Banco: **${user.bank} yens**`
+      `💴 **Yens**\nCarteira: ${econ[id].wallet}\nBanco: ${econ[id].bank}`
     );
   }
 
-  /* ===== DEPOSIT ===== */
-  if (interaction.commandName === "deposit") {
-    const valor = interaction.options.getInteger("valor");
-    if (valor <= 0 || valor > user.wallet)
-      return interaction.reply({ content: "❌ Valor inválido.", ephemeral: true });
+  // ===== DEPOSIT =====
+  if (interaction.commandName === 'deposit') {
+    const v = interaction.options.getInteger('valor');
+    if (v <= 0 || v > econ[id].wallet)
+      return interaction.reply({ content: '❌ Valor inválido.', ephemeral: true });
 
-    user.wallet -= valor;
-    user.bank += valor;
-    saveDB(db);
+    econ[id].wallet -= v;
+    econ[id].bank += v;
+    saveJSON(ECON_FILE, econ);
 
-    return interaction.reply(`🏦 Depositado **${valor} yens**`);
+    return interaction.reply(`🏦 Depositados ${v} yens.`);
   }
 
-  /* ===== WITHDRAW ===== */
-  if (interaction.commandName === "withdraw") {
-    const valor = interaction.options.getInteger("valor");
-    if (valor <= 0 || valor > user.bank)
-      return interaction.reply({ content: "❌ Valor inválido.", ephemeral: true });
+  // ===== WITHDRAW =====
+  if (interaction.commandName === 'withdraw') {
+    const v = interaction.options.getInteger('valor');
+    if (v <= 0 || v > econ[id].bank)
+      return interaction.reply({ content: '❌ Valor inválido.', ephemeral: true });
 
-    user.bank -= valor;
-    user.wallet += valor;
-    saveDB(db);
+    econ[id].bank -= v;
+    econ[id].wallet += v;
+    saveJSON(ECON_FILE, econ);
 
-    return interaction.reply(`💴 Sacado **${valor} yens**`);
+    return interaction.reply(`💸 Sacados ${v} yens.`);
   }
 
-  /* ===== INVENTORY ===== */
-  if (interaction.commandName === "inventory") {
-    return interaction.reply(
-      `🎒 **Inventário**\n` +
-      `🩸 Sukuna Finger: ${user.inventory.sukuna_finger}\n` +
-      `🗝️ Gokumonkyo: ${user.inventory.gokumonkyo}`
-    );
+  // ===== INVENTORY =====
+  if (interaction.commandName === 'inventory') {
+    const items = inv[id].items;
+    if (Object.keys(items).length === 0)
+      return interaction.reply('🎒 Inventário vazio.');
+
+    let txt = '🎒 **Inventário:**\n';
+    for (const i in items) txt += `• ${i}: ${items[i]}\n`;
+    return interaction.reply(txt);
   }
 
-  /* ===== SHENANIGANS BET ===== */
-  if (interaction.commandName === "shenanigans_bet") {
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
+  // ===== SHENANIGANS BET =====
+  if (interaction.commandName === 'shenanigans_bet') {
+    const now = new Date();
+    const day = now.getDay(); // 0 = domingo
+    if (day !== 0)
+      return interaction.reply({ content: '❌ Só pode aos domingos.', ephemeral: true });
 
-    if (now - user.lastWork < day)
-      return interaction.reply({ content: "⏳ Você já usou hoje.", ephemeral: true });
+    const today = now.toDateString();
+    if (econ[id].lastWork === today)
+      return interaction.reply({ content: '❌ Você já usou hoje.', ephemeral: true });
 
-    user.lastWork = now;
-    user.streak++;
+    const gain = 270;
+    econ[id].wallet += gain;
+    econ[id].lastWork = today;
+    saveJSON(ECON_FILE, econ);
 
-    let ganho = Math.floor(Math.random() * 200) + 100;
-
-    // streak bônus
-    if (user.streak >= 3) ganho += 100;
-
-    // desastre (20%)
-    if (Math.random() < 0.2) {
-      user.wallet = Math.max(0, user.wallet - 150);
-      user.streak = 0;
-      saveDB(db);
-      return interaction.reply("💥 **DESASTRE!** Você perdeu 150 yens.");
-    }
-
-    // itens
-    if (Math.random() < 0.1) user.inventory.sukuna_finger++;
-    if (Math.random() < 0.05) user.inventory.gokumonkyo++;
-
-    user.wallet += ganho;
-
-    /* ===== ROLES ===== */
-    const member = await interaction.guild.members.fetch(interaction.user.id);
-
-    if (user.inventory.sukuna_finger >= 2)
-      await member.roles.add(SUKUNA_ROLE).catch(() => {});
-
-    if (user.inventory.gokumonkyo >= 3)
-      await member.roles.add(HONORED_ROLE).catch(() => {});
-
-    if (member.roles.cache.has(FUNDADOR_ROLE))
-      ganho += 100;
-
-    saveDB(db);
-
-    return interaction.reply(
-      `🎲 Você ganhou **${ganho} yens**!\n🔥 Streak: ${user.streak}`
-    );
+    return interaction.reply(`😈 Você ganhou **${gain} yens** em esquemas duvidosos.`);
   }
 });
 
+// ======================
 client.login(TOKEN);
