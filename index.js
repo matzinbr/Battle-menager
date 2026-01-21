@@ -226,7 +226,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 /* ================= WORK COM YENS ================= */
-const WORK_REWARD = 500; // Yens por uso
+const WORK_REWARD = 270; // Yens por uso
 
 const workCooldown = new Map(); // Para evitar spam
 const WORK_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutos
