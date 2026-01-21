@@ -13,7 +13,7 @@ const {
   EmbedBuilder
 } = require('discord.js');
 
-const { recordMatch, getLeaderboard, loadRanking } = require('./ranking.js');
+const { recordMatch, getLeaderboard, getProfile, loadRanking } = require('./ranking.js');
 
 /* ================= CONFIG ================= */
 const TOKEN = process.env.TOKEN;
@@ -23,6 +23,7 @@ const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 const TZ = process.env.TZ || 'America/Sao_Paulo';
 const STATE_FILE = path.join(__dirname, 'arena_state.json');
+const CURRENCY_EMOJI = '<:MoneyPilePNGClipart:1463070061630718177>'; // Yens emoji
 
 /* ================= CLIENT ================= */
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -35,11 +36,8 @@ async function readState() {
 async function saveState(state) { await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2)); }
 
 /* ================= TIME LOGIC ================= */
-function workIsOpen(state) {
-  const now = DateTime.now().setZone(TZ);
-  const isSunday = now.weekday === 7;
-  return state.override !== null ? state.override : isSunday;
-}
+function isSundayOpen() { return DateTime.now().setZone(TZ).weekday === 7; }
+function workIsOpen(state) { return state.override !== null ? state.override : isSundayOpen(); }
 
 /* ================= PERMISSIONS ================= */
 async function setWorkPermission(open) {
@@ -63,7 +61,9 @@ async function log(msg) {
 /* ================= RECONCILE ================= */
 async function reconcile() {
   const state = await readState();
-  const shouldOpen = workIsOpen(state);
+  const now = DateTime.now().setZone(TZ);
+  const isSunday = now.weekday === 7;
+  const shouldOpen = state.override !== null ? state.override : isSunday;
 
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(CHANNEL_ID);
@@ -75,7 +75,11 @@ async function reconcile() {
 
     const embed = new EmbedBuilder()
       .setTitle(shouldOpen ? '💰 WORK LIBERADO' : '⛔ WORK ENCERRADO')
-      .setDescription(shouldOpen ? 'Use `/work` até 00:00 para apostas.' : '⛔ WORK fechado — só funciona aos domingos!')
+      .setDescription(
+        shouldOpen
+          ? `Use /arena_work até 23:59 para apostas.`
+          : '⛔ WORK fechado — só funciona aos domingos!'
+      )
       .setColor(shouldOpen ? 0x00ff99 : 0xff5555)
       .setTimestamp();
 
@@ -98,10 +102,10 @@ const commands = [
     .setDescription('Registrar resultado de uma partida X1')
     .addUserOption(o => o.setName('vencedor').setDescription('Quem ganhou').setRequired(true))
     .addUserOption(o => o.setName('perdedor').setDescription('Quem perdeu').setRequired(true))
-    .addIntegerOption(o => o.setName('valor').setDescription('Valor apostado por jogador').setRequired(true)),
+    .addIntegerOption(o => o.setName('valor').setDescription('Valor em Yens apostado').setRequired(true)),
 
   new SlashCommandBuilder().setName('rank').setDescription('Mostra o ranking top 10'),
-  new SlashCommandBuilder().setName('profile').setDescription('Mostra suas estatísticas de vitórias/derrotas')
+  new SlashCommandBuilder().setName('profile').setDescription('Mostra suas estatísticas')
 ].map(c => c.toJSON());
 
 /* ================= READY ================= */
@@ -114,46 +118,30 @@ client.once('ready', async () => {
   await saveState(await readState());
   await reconcile();
 
-  cron.schedule('0 9 * * 0', reconcile, { timezone: TZ }); // Domingo às 9h
-  cron.schedule('0 0 * * 1', reconcile, { timezone: TZ }); // Segunda às 00h
-  cron.schedule('*/5 * * * *', reconcile, { timezone: TZ }); // Auto check a cada 5 min
+  cron.schedule('0 9 * * 0', reconcile, { timezone: TZ }); // Domingo
+  cron.schedule('0 0 * * 1', reconcile, { timezone: TZ }); // Segunda
+  cron.schedule('*/5 * * * *', reconcile, { timezone: TZ }); // Auto check
 });
 
 /* ================= INTERACTIONS ================= */
-const x1Cooldown = new Set();
-
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const state = await readState();
-  const now = DateTime.now().setZone(TZ);
-  const isAdmin = interaction.memberPermissions.has(PermissionFlagsBits.Administrator) ||
+  const isAdmin =
+    interaction.memberPermissions.has(PermissionFlagsBits.Administrator) ||
     (ADMIN_ROLE_ID && interaction.member.roles.cache.has(ADMIN_ROLE_ID));
 
   /* ---------- WORK ---------- */
-  if (interaction.commandName === 'work') {
-    const isSunday = now.weekday === 7;
-
-    if (!isSunday && !isAdmin && state.override === null) {
-      try {
-        await interaction.user.send('⛔ O WORK só funciona aos domingos! Aguarde até o próximo domingo.');
-      } catch {
-        await interaction.reply({ content: '⛔ O WORK só funciona aos domingos! Aguarde até o próximo domingo.', ephemeral: true });
-      }
-      return;
-    }
-
-    await interaction.reply({ content: `💰 ${interaction.user.username} usou /work com sucesso! (teste)`, ephemeral: true });
-  }
-
-  /* ---------- STATUS / FORÇAR / CLEAR ---------- */
   if (interaction.commandName === 'status-work') {
     const open = workIsOpen(state);
     return interaction.reply({ embeds: [new EmbedBuilder().setTitle(open ? '✅ WORK LIBERADO' : '⛔ WORK BLOQUEADO').setColor(open ? 0x00ff99 : 0xff5555)], ephemeral: true });
   }
 
-  if (!isAdmin && ['forcar-work', 'clear-override', 'x1_result'].includes(interaction.commandName)) {
-    return interaction.reply({ content: '🔒 Apenas a staff pode usar este comando.', ephemeral: true });
+  if (!isAdmin) {
+    if (['forcar-work', 'clear-override', 'x1_result'].includes(interaction.commandName)) {
+      return interaction.reply({ content: '🔒 Apenas a staff pode usar este comando.', ephemeral: true });
+    }
   }
 
   if (interaction.commandName === 'forcar-work') {
@@ -176,31 +164,26 @@ client.on('interactionCreate', async interaction => {
     const perdedor = interaction.options.getUser('perdedor');
     const valor = interaction.options.getInteger('valor');
 
-    if (x1Cooldown.has(interaction.user.id)) {
-      return interaction.reply({ content: '⏳ Aguarde 10 segundos antes de registrar outra partida.', ephemeral: true });
-    }
-
-    if (!valor || valor <= 0) {
-      return interaction.reply({ content: '❌ O valor da aposta deve ser maior que 0!', ephemeral: true });
-    }
-
     if (vencedor.id === perdedor.id) {
       return interaction.reply({ content: '❌ O vencedor e o perdedor não podem ser a mesma pessoa!', ephemeral: true });
     }
+
+    if (valor <= 0) return interaction.reply({ content: '❌ O valor deve ser maior que 0.', ephemeral: true });
+
+    const loserProfile = await getProfile(perdedor.id);
+    if (!loserProfile) return interaction.reply({ content: '❌ O perdedor ainda não tem perfil.', ephemeral: true });
+    if (loserProfile.yens < valor) return interaction.reply({ content: `❌ O perdedor não possui ${valor} ${CURRENCY_EMOJI}.`, ephemeral: true });
 
     await recordMatch(vencedor, perdedor, valor);
 
     const embed = new EmbedBuilder()
       .setTitle('🎮 Resultado X1 registrado')
-      .setDescription(`${vencedor.username} venceu ${perdedor.username}\n💰 Dinheiro total apostado: ${valor*2} yens`)
+      .setDescription(`${vencedor.username} ganhou do ${perdedor.username}\n💰 Valor total: ${valor * 2} ${CURRENCY_EMOJI}`)
       .setColor(0x00ff99)
       .setTimestamp();
 
     await interaction.reply({ embeds: [embed] });
-    await log(`X1 registrado → ${vencedor.username} venceu ${perdedor.username} | Valor: ${valor} yens`);
-
-    x1Cooldown.add(interaction.user.id);
-    setTimeout(() => x1Cooldown.delete(interaction.user.id), 10000); // 10 segundos cooldown
+    await log(`X1 registrado → ${vencedor.username} ganhou do ${perdedor.username} por ${valor * 2} ${CURRENCY_EMOJI}`);
   }
 
   /* ---------- RANK ---------- */
@@ -215,9 +198,8 @@ client.on('interactionCreate', async interaction => {
       embed.setDescription('Nenhum jogador registrado ainda.');
     } else {
       let desc = '';
-      leaderboard.forEach((p,i) => {
-        const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
-        desc += `${medal} **${i+1}. ${p.name}** - Vitórias: ${p.wins} - Streak: ${p.streak}\n`;
+      leaderboard.forEach((p, i) => {
+        desc += `**${i + 1}. ${p.name}** - Vitórias: ${p.wins} - Streak: ${p.streak} - ${p.yens} ${CURRENCY_EMOJI}\n`;
       });
       embed.setDescription(desc);
     }
@@ -227,8 +209,7 @@ client.on('interactionCreate', async interaction => {
 
   /* ---------- PROFILE ---------- */
   if (interaction.commandName === 'profile') {
-    const ranking = await loadRanking();
-    const player = ranking.players[interaction.user.id];
+    const player = await getProfile(interaction.user.id);
 
     if (!player) {
       return interaction.reply({ content: 'Você ainda não tem nenhuma partida registrada.', ephemeral: true });
@@ -236,7 +217,7 @@ client.on('interactionCreate', async interaction => {
 
     const embed = new EmbedBuilder()
       .setTitle(`📊 Perfil de ${player.name}`)
-      .setDescription(`Vitórias: ${player.wins}\nDerrotas: ${player.losses}\nStreak atual: ${player.streak}\nPartidas jogadas: ${player.wins+player.losses}`)
+      .setDescription(`Vitórias: ${player.wins}\nDerrotas: ${player.losses}\nStreak: ${player.streak}\n💰 Yens: ${player.yens} ${CURRENCY_EMOJI}`)
       .setColor(0x00ccff)
       .setTimestamp();
 
