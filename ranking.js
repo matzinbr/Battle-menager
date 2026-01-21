@@ -63,4 +63,4 @@ async function getProfile(userId) {
   return player || null;
 }
 
-module.exports = { recordMatch, getLeaderboard, getProfile, loadRanking };
+module.exports = { recordMatch, getLeaderboard, loadRanking, saveRanking };
