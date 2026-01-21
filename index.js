@@ -1,206 +1,137 @@
-require('dotenv').config();
-const {
-  Client,
-  GatewayIntentBits,
-  SlashCommandBuilder,
-  REST,
-  Routes,
-  EmbedBuilder,
-  PermissionFlagsBits
-} = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, Routes } = require('discord.js');
+const { REST } = require('@discordjs/rest');
+const ranking = require('./ranking');
 
-const {
-  recordMatch,
-  getLeaderboard,
-  getProfile,
-  tradeItem,
-  loadRanking,
-  saveRanking
-} = require('./ranking.js');
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
+});
 
 const TOKEN = process.env.TOKEN;
-const GUILD_ID = process.env.GUILD_ID;
-const TZ = 'America/Sao_Paulo';
-
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-/* ================= UTIL ================= */
-function isSundayValid() {
-  const now = new Date().toLocaleString('en-US', { timeZone: TZ });
-  const date = new Date(now);
-  const day = date.getDay(); // 0 = domingo
-  const hour = date.getHours();
-  return day === 0 && hour >= 9 && hour <= 23;
-}
-
-async function ensurePlayer(user) {
-  const ranking = await loadRanking();
-  if (!ranking.players[user.id]) {
-    ranking.players[user.id] = {
-      name: user.username,
-      wins: 0,
-      losses: 0,
-      streak: 0,
-      wallet: 600,
-      bank: 0,
-      items: { sukuna: 0, gokumonkyo: 0 }
-    };
-    await saveRanking(ranking);
-  }
-}
+const CLIENT_ID = process.env.CLIENT_ID;
 
 /* ================= COMMANDS ================= */
 const commands = [
-  new SlashCommandBuilder().setName('bank').setDescription('Ver seus yens'),
   new SlashCommandBuilder()
-    .setName('deposit')
-    .setDescription('Depositar yens no banco')
-    .addIntegerOption(o => o.setName('valor').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('withdraw')
-    .setDescription('Sacar yens do banco')
-    .addIntegerOption(o => o.setName('valor').setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName('x1_result')
-    .setDescription('Registrar X1')
-    .addUserOption(o => o.setName('vencedor').setRequired(true))
-    .addUserOption(o => o.setName('perdedor').setRequired(true))
-    .addIntegerOption(o => o.setName('valor').setRequired(true)),
-
-  new SlashCommandBuilder().setName('rank').setDescription('Ranking Top 10'),
-  new SlashCommandBuilder().setName('profile').setDescription('Seu perfil'),
+    .setName('profile')
+    .setDescription('Ver seu perfil e estatísticas'),
 
   new SlashCommandBuilder()
     .setName('trade')
-    .setDescription('Trocar itens por cargos')
-    .addStringOption(o =>
-      o.setName('item')
+    .setDescription('Trocar itens colecionáveis por títulos')
+    .addStringOption(opt =>
+      opt
+        .setName('item')
+        .setDescription('Item para trocar')
         .setRequired(true)
         .addChoices(
           { name: 'Sukuna Finger', value: 'sukuna' },
-          { name: 'Gokumonkyo', value: 'gokumonkyo' }
+          { name: 'Gokumonkyō', value: 'gokumonkyo' }
         )
     ),
 
-  new SlashCommandBuilder().setName('shenanigans_bet').setDescription('Work de domingo')
-].map(c => c.toJSON());
+  new SlashCommandBuilder()
+    .setName('shenanigans_bet')
+    .setDescription('Apostar yens no evento Shenanigans'),
 
-/* ================= READY ================= */
-client.once('ready', async () => {
-  console.log(`✅ Bot online: ${client.user.tag}`);
-  await rest.put(
-    Routes.applicationGuildCommands(client.user.id, GUILD_ID),
-    { body: commands }
-  );
-});
+  new SlashCommandBuilder()
+    .setName('bank')
+    .setDescription('Ver saldo da carteira e do banco'),
+
+  new SlashCommandBuilder()
+    .setName('withdraw')
+    .setDescription('Sacar dinheiro do banco')
+    .addIntegerOption(opt =>
+      opt
+        .setName('valor')
+        .setDescription('Valor para sacar')
+        .setRequired(true)
+    )
+];
+
+/* ================= REGISTER ================= */
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+(async () => {
+  try {
+    console.log('⏳ Registrando comandos...');
+    await rest.put(
+      Routes.applicationCommands(CLIENT_ID),
+      { body: commands.map(cmd => cmd.toJSON()) }
+    );
+    console.log('✅ Comandos registrados!');
+  } catch (err) {
+    console.error('❌ Erro ao registrar comandos:', err);
+  }
+})();
 
 /* ================= INTERACTIONS ================= */
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  await ensurePlayer(interaction.user);
 
-  const ranking = await loadRanking();
-  const player = ranking.players[interaction.user.id];
+  if (interaction.commandName === 'profile') {
+    const profile = await ranking.getProfile(interaction.user.id);
+    if (!profile) {
+      return interaction.reply('Você ainda não possui perfil.');
+    }
 
-  /* ===== BANK ===== */
-  if (interaction.commandName === 'bank') {
-    const embed = new EmbedBuilder()
-      .setTitle('🏦 Seus Yens')
-      .setDescription(
-        `💰 Carteira: **${player.wallet}** yens\n🏦 Banco: **${player.bank}** yens`
-      )
-      .setColor(0x00ff99);
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+    return interaction.reply(
+      `👤 **${profile.name}**
+🏆 Vitórias: ${profile.wins}
+💀 Derrotas: ${profile.losses}
+🔥 Streak: ${profile.streak}
+💰 Carteira: ${profile.wallet} yens
+🏦 Banco: ${profile.bank} yens`
+    );
   }
 
-  if (interaction.commandName === 'deposit') {
-    const v = interaction.options.getInteger('valor');
-    if (v <= 0 || player.wallet < v)
-      return interaction.reply({ content: '❌ Valor inválido.', ephemeral: true });
+  if (interaction.commandName === 'trade') {
+    const item = interaction.options.getString('item');
+    const result = await ranking.tradeItem(interaction.user.id, item);
 
-    player.wallet -= v;
-    player.bank += v;
-    await saveRanking(ranking);
-    return interaction.reply({ content: `✅ Depositado ${v} yens.` });
+    if (!result.success) {
+      return interaction.reply(result.message);
+    }
+
+    const role = interaction.guild.roles.cache.get(result.reward.roleId);
+    if (role) {
+      await interaction.member.roles.add(role);
+    }
+
+    return interaction.reply('✅ Troca realizada com sucesso!');
+  }
+
+  if (interaction.commandName === 'bank') {
+    const profile = await ranking.getProfile(interaction.user.id);
+    if (!profile) return interaction.reply('Perfil não encontrado.');
+
+    return interaction.reply(
+      `💰 Carteira: ${profile.wallet} yens\n🏦 Banco: ${profile.bank} yens`
+    );
   }
 
   if (interaction.commandName === 'withdraw') {
-    const v = interaction.options.getInteger('valor');
-    if (v <= 0 || player.bank < v)
-      return interaction.reply({ content: '❌ Valor inválido.', ephemeral: true });
-
-    player.bank -= v;
-    player.wallet += v;
-    await saveRanking(ranking);
-    return interaction.reply({ content: `✅ Sacado ${v} yens.` });
-  }
-
-  /* ===== WORK ===== */
-  if (interaction.commandName === 'shenanigans_bet') {
-    if (!isSundayValid())
-      return interaction.reply({ content: '⛔ Apenas domingo 09:00–23:59.', ephemeral: true });
-
-    player.wallet += 270;
-    await saveRanking(ranking);
-    return interaction.reply({ content: '💸 Você ganhou **270 yens**!' });
-  }
-
-  /* ===== X1 ===== */
-  if (interaction.commandName === 'x1_result') {
-    const vencedor = interaction.options.getUser('vencedor');
-    const perdedor = interaction.options.getUser('perdedor');
     const valor = interaction.options.getInteger('valor');
+    const profile = await ranking.getProfile(interaction.user.id);
 
-    await ensurePlayer(vencedor);
-    await ensurePlayer(perdedor);
+    if (!profile || profile.bank < valor) {
+      return interaction.reply('Saldo insuficiente.');
+    }
 
-    const r = await loadRanking();
-    if (r.players[perdedor.id].wallet < valor)
-      return interaction.reply({ content: '❌ Perdedor sem yens.', ephemeral: true });
+    profile.bank -= valor;
+    profile.wallet += valor;
+    await ranking.saveRanking({ players: { [interaction.user.id]: profile } });
 
-    r.players[perdedor.id].wallet -= valor;
-    r.players[vencedor.id].wallet += valor * 2;
-
-    await saveRanking(r);
-    await recordMatch(vencedor, perdedor, valor);
-
-    return interaction.reply(`⚔️ **${vencedor.username}** venceu e ganhou **${valor * 2} yens**`);
+    return interaction.reply(`✅ Você sacou ${valor} yens.`);
   }
 
-  /* ===== RANK ===== */
-  if (interaction.commandName === 'rank') {
-    const lb = await getLeaderboard();
-    const embed = new EmbedBuilder().setTitle('🏆 Ranking');
-    embed.setDescription(lb.map((p, i) => `**${i + 1}. ${p.name}** - ${p.wins} vitórias`).join('\n'));
-    return interaction.reply({ embeds: [embed] });
-  }
-
-  /* ===== PROFILE ===== */
-  if (interaction.commandName === 'profile') {
-    const embed = new EmbedBuilder()
-      .setTitle(`📊 ${player.name}`)
-      .setDescription(
-        `Vitórias: ${player.wins}\nDerrotas: ${player.losses}\nStreak: ${player.streak}\n💰 Carteira: ${player.wallet}`
-      );
-    return interaction.reply({ embeds: [embed], ephemeral: true });
-  }
-
-  /* ===== TRADE ===== */
-  if (interaction.commandName === 'trade') {
-    const item = interaction.options.getString('item');
-    const result = await tradeItem(interaction.user.id, item);
-
-    if (!result.success)
-      return interaction.reply({ content: result.message, ephemeral: true });
-
-    const role = interaction.guild.roles.cache.get(result.reward.roleId);
-    if (role) await interaction.member.roles.add(role);
-
-    return interaction.reply(`🏆 Você recebeu o cargo **${result.reward.title}**!`);
+  if (interaction.commandName === 'shenanigans_bet') {
+    return interaction.reply('🎲 Aposta registrada!');
   }
 });
 
-/* ================= LOGIN ================= */
+/* ================= READY ================= */
+client.once('ready', () => {
+  console.log(`✅ Bot online: ${client.user.tag}`);
+});
+
 client.login(TOKEN);
