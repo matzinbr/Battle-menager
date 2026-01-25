@@ -15,20 +15,12 @@
  *
  * Use com: node index.perfect.js
  */
-// ===== Polyfill ReadableStream para undici (resolve: ReferenceError: ReadableStream is not defined) =====
-try {
-  // Node 18+ fornece stream/web
-  const { ReadableStream } = await import('stream/web');
-  globalThis.ReadableStream ??= ReadableStream;
-} catch (err) {
-  // fallback: polyfill se stream/web não estiver disponível
-  try {
-    const poly = await import('web-streams-polyfill/ponyfill');
-    globalThis.ReadableStream ??= poly.ReadableStream;
-  } catch (e) {
-    // se falhar aqui, mostraremos erro mais explícito no console ao iniciar
-    console.warn('Aviso: não foi possível polyfill ReadableStream automaticamente.', e);
-  }
+
+// ===== ReadableStream polyfill (SAFE for undici / discord.js) =====
+// Use stream/web (Node 18+) synchronously to avoid top-level await issues.
+import { ReadableStream as WebReadableStream } from 'stream/web';
+if (!globalThis.ReadableStream) {
+  globalThis.ReadableStream = WebReadableStream;
 }
 
 import dotenv from 'dotenv';
