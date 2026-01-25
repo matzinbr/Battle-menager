@@ -1,9 +1,9 @@
 // ======================================================
-// Battle Manager — FINAL DEFINITIVO
+// Battle Manager — MASTER EDITION
 // Node.js 20 LTS | discord.js v14 | ESM
 // ======================================================
 
-// ===== ReadableStream (resolve crash em cloud) =====
+// ===== Polyfill ReadableStream para compatibilidade cloud =====
 import { ReadableStream } from 'stream/web';
 globalThis.ReadableStream ??= ReadableStream;
 
@@ -15,6 +15,7 @@ import fs from 'fs/promises';
 import { existsSync, mkdirSync } from 'fs';
 import path from 'path';
 import { DateTime } from 'luxon';
+import crypto from 'crypto';
 
 import {
   Client,
@@ -23,7 +24,8 @@ import {
   Routes,
   SlashCommandBuilder,
   PermissionFlagsBits,
-  EmbedBuilder
+  EmbedBuilder,
+  Colors
 } from 'discord.js';
 
 // ================= CONFIG =================
@@ -35,20 +37,23 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   throw new Error('TOKEN, CLIENT_ID e GUILD_ID são obrigatórios');
 }
 
+// ================= CONSTANTES =================
 const TZ = 'America/Sao_Paulo';
 const START_YENS = 600;
 const MAX_WALLET = 5000;
 const SHEN_BASE = 270;
 const DISASTER_CHANCE = 0.05;
 const MAX_LOGS = 500;
+const BACKUP_INTERVAL_MIN = 10;
 
 // ================= PATHS =================
 const ROOT = process.cwd();
 const DATA_PATH = path.join(ROOT, 'data.json');
 const BACKUP_DIR = path.join(ROOT, 'backups');
+
 if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
 
-// ================= TIME =================
+// ================= UTIL =================
 const now = () => DateTime.now().setZone(TZ);
 const todayISO = () => now().toISODate();
 
@@ -115,44 +120,50 @@ function log(type, data) {
   if (db.logs.length > MAX_LOGS) db.logs.length = MAX_LOGS;
 }
 
-// ================= DISCORD =================
+// ================= DISCORD CLIENT =================
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ================= COMMANDS =================
+// ================= COMANDOS =================
 const commands = [
-  new SlashCommandBuilder().setName('ping').setDescription('Teste de latência'),
+  new SlashCommandBuilder().setName('ping').setDescription('🏓 Teste de latência'),
 
-  new SlashCommandBuilder().setName('balance').setDescription('Ver saldo'),
+  new SlashCommandBuilder().setName('balance').setDescription('💰 Ver saldo'),
 
   new SlashCommandBuilder()
     .setName('deposit')
-    .setDescription('Depositar yens')
+    .setDescription('🏦 Depositar yens')
     .addIntegerOption(o =>
-      o.setName('valor').setDescription('Valor').setRequired(true)
+      o.setName('valor')
+        .setDescription('Quantidade para depositar')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('withdraw')
-    .setDescription('Sacar yens')
+    .setDescription('💸 Sacar yens')
     .addIntegerOption(o =>
-      o.setName('valor').setDescription('Valor').setRequired(true)
+      o.setName('valor')
+        .setDescription('Quantidade para sacar')
+        .setRequired(true)
     ),
 
-  new SlashCommandBuilder().setName('inventory').setDescription('Inventário'),
+  new SlashCommandBuilder().setName('inventory').setDescription('🎒 Ver inventário'),
 
-  new SlashCommandBuilder().setName('profile').setDescription('Perfil'),
+  new SlashCommandBuilder().setName('profile').setDescription('👤 Ver perfil'),
 
   new SlashCommandBuilder()
     .setName('trade')
-    .setDescription('Trocar item')
+    .setDescription('🔄 Trocar item com outro jogador')
     .addUserOption(o =>
-      o.setName('usuario').setDescription('Usuário').setRequired(true)
+      o.setName('usuario')
+        .setDescription('Usuário para trocar')
+        .setRequired(true)
     )
     .addStringOption(o =>
       o.setName('item')
-        .setDescription('Item')
+        .setDescription('Item a ser trocado')
         .setRequired(true)
         .addChoices(
           { name: 'Sukuna Finger', value: 'sukuna_finger' },
@@ -160,30 +171,29 @@ const commands = [
         )
     )
     .addIntegerOption(o =>
-      o.setName('quantidade').setDescription('Quantidade').setRequired(true)
+      o.setName('quantidade')
+        .setDescription('Quantidade do item')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('shenanigans_bet')
-    .setDescription('Aposta semanal (domingo)'),
+    .setDescription('🎲 Aposta semanal (domingo)'),
 
-  new SlashCommandBuilder().setName('rank').setDescription('Ranking'),
+  new SlashCommandBuilder().setName('rank').setDescription('🏆 Ranking dos jogadores'),
 
   new SlashCommandBuilder()
     .setName('backup_restore')
-    .setDescription('Restaurar último backup')
+    .setDescription('📦 Restaurar último backup')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ].map(c => c.toJSON());
 
-// ================= REGISTER =================
+// ================= REGISTER COMANDOS =================
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 client.once('ready', async () => {
   console.log(`🔥 Online como ${client.user.tag}`);
-  await rest.put(
-    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-    { body: commands }
-  );
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
   console.log('✅ Comandos registrados');
 });
 
@@ -193,66 +203,96 @@ client.on('interactionCreate', async interaction => {
   const player = getPlayer(interaction.user);
 
   try {
+    // ================= PING =================
     if (interaction.commandName === 'ping') {
-      return interaction.reply(`🏓 Pong ${client.ws.ping}ms`);
+      const embed = new EmbedBuilder()
+        .setTitle('🏓 Pong!')
+        .setDescription(`Latência: ${client.ws.ping}ms`)
+        .setColor(Colors.Green);
+      return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= BALANCE =================
     if (interaction.commandName === 'balance') {
-      return interaction.reply(
-        `💴 Carteira: ${player.wallet}\n🏦 Banco: ${player.bank}`
-      );
+      const embed = new EmbedBuilder()
+        .setTitle(`💰 Saldo de ${player.name}`)
+        .addFields(
+          { name: 'Carteira', value: `${player.wallet} Yens`, inline: true },
+          { name: 'Banco', value: `${player.bank} Yens`, inline: true }
+        )
+        .setColor(Colors.Blue);
+      return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= DEPOSIT =================
     if (interaction.commandName === 'deposit') {
       const v = interaction.options.getInteger('valor');
       if (v <= 0 || v > player.wallet)
-        return interaction.reply({ content: 'Valor inválido', ephemeral: true });
+        return interaction.reply({ content: '❌ Valor inválido', ephemeral: true });
       player.wallet -= v;
       player.bank += v;
-      log('deposit', { user: player.id, v });
+      log('deposit', { user: player.id, value: v });
       await queueWrite(db);
-      return interaction.reply(`🏦 Depositado ${v}`);
+      const embed = new EmbedBuilder()
+        .setTitle('🏦 Depósito')
+        .setDescription(`${v} Yens depositados com sucesso!`)
+        .setColor(Colors.Green);
+      return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= WITHDRAW =================
     if (interaction.commandName === 'withdraw') {
       const v = interaction.options.getInteger('valor');
       if (v <= 0 || v > player.bank)
-        return interaction.reply({ content: 'Valor inválido', ephemeral: true });
+        return interaction.reply({ content: '❌ Valor inválido', ephemeral: true });
       if (player.wallet + v > MAX_WALLET)
-        return interaction.reply({ content: 'Limite excedido', ephemeral: true });
+        return interaction.reply({ content: '❌ Limite da carteira excedido', ephemeral: true });
       player.bank -= v;
       player.wallet += v;
-      log('withdraw', { user: player.id, v });
+      log('withdraw', { user: player.id, value: v });
       await queueWrite(db);
-      return interaction.reply(`💸 Sacado ${v}`);
+      const embed = new EmbedBuilder()
+        .setTitle('💸 Saque')
+        .setDescription(`${v} Yens sacados com sucesso!`)
+        .setColor(Colors.Gold);
+      return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= INVENTORY =================
     if (interaction.commandName === 'inventory') {
-      return interaction.reply(
-        `🎒 Sukuna Finger: ${player.inventory.sukuna_finger}\n🎒 Gokumonkyo: ${player.inventory.gokumonkyo}`
-      );
+      const embed = new EmbedBuilder()
+        .setTitle(`🎒 Inventário de ${player.name}`)
+        .addFields(
+          { name: 'Sukuna Finger', value: `${player.inventory.sukuna_finger}`, inline: true },
+          { name: 'Gokumonkyo', value: `${player.inventory.gokumonkyo}`, inline: true }
+        )
+        .setColor(Colors.Purple);
+      return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= PROFILE =================
     if (interaction.commandName === 'profile') {
       const embed = new EmbedBuilder()
-        .setTitle(player.name)
+        .setTitle(`👤 Perfil de ${player.name}`)
         .addFields(
           { name: 'Carteira', value: `${player.wallet}`, inline: true },
           { name: 'Banco', value: `${player.bank}`, inline: true },
           { name: 'Vitórias', value: `${player.wins}`, inline: true },
           { name: 'Derrotas', value: `${player.losses}`, inline: true },
           { name: 'Streak', value: `${player.streak}`, inline: true }
-        );
+        )
+        .setColor(Colors.Aqua);
       return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= SHENANIGANS BET =================
     if (interaction.commandName === 'shenanigans_bet') {
       if (now().weekday !== 7)
-        return interaction.reply({ content: 'Só aos domingos', ephemeral: true });
+        return interaction.reply({ content: '❌ Só disponível aos domingos', ephemeral: true });
 
       const sunday = todayISO();
       if (player.shenanigans.lastSunday === sunday)
-        return interaction.reply({ content: 'Já usado hoje', ephemeral: true });
+        return interaction.reply({ content: '❌ Já usado hoje', ephemeral: true });
 
       player.shenanigans.lastSunday = sunday;
       const loss = Math.random() < DISASTER_CHANCE;
@@ -262,42 +302,57 @@ client.on('interactionCreate', async interaction => {
       log('shenanigans', { user: player.id, value });
       await queueWrite(db);
 
-      return interaction.reply(
-        loss
-          ? `💀 Falha! Perdeu ${SHEN_BASE}`
-          : `🎉 Sucesso! Ganhou ${SHEN_BASE}`
-      );
+      const embed = new EmbedBuilder()
+        .setTitle(loss ? '💀 Falha!' : '🎉 Sucesso!')
+        .setDescription(loss ? `Perdeu ${SHEN_BASE} Yens` : `Ganhou ${SHEN_BASE} Yens`)
+        .setColor(loss ? Colors.Red : Colors.Green);
+      return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= RANK =================
     if (interaction.commandName === 'rank') {
       const top = Object.values(db.players)
         .sort((a, b) => b.wallet - a.wallet)
-        .slice(0, 5)
-        .map((p, i) => `#${i + 1} ${p.name} — ${p.wallet}`)
+        .slice(0, 10)
+        .map((p, i) => `#${i + 1} ${p.name} — ${p.wallet} Yens`)
         .join('\n');
-      return interaction.reply(`🏆 Ranking\n${top}`);
+      const embed = new EmbedBuilder()
+        .setTitle('🏆 Ranking dos Jogadores')
+        .setDescription(top || 'Nenhum jogador registrado')
+        .setColor(Colors.Yellow);
+      return interaction.reply({ embeds: [embed] });
     }
 
+    // ================= BACKUP RESTORE =================
     if (interaction.commandName === 'backup_restore') {
       const backup = path.join(BACKUP_DIR, 'latest.json');
       if (!existsSync(backup))
-        return interaction.reply('Nenhum backup');
+        return interaction.reply({ content: '❌ Nenhum backup encontrado' });
       const restored = JSON.parse(await fs.readFile(backup, 'utf8'));
       Object.assign(db, restored);
       await queueWrite(db);
-      return interaction.reply('Backup restaurado');
+      const embed = new EmbedBuilder()
+        .setTitle('📦 Backup Restaurado')
+        .setDescription('Último backup restaurado com sucesso')
+        .setColor(Colors.Green);
+      return interaction.reply({ embeds: [embed] });
     }
+
   } catch (err) {
     console.error(err);
-    interaction.reply({ content: 'Erro interno', ephemeral: true });
+    return interaction.reply({ content: '❌ Erro interno', ephemeral: true });
   }
 });
 
 // ================= BACKUP AUTO =================
 setInterval(async () => {
-  const file = path.join(BACKUP_DIR, 'latest.json');
+  const file = path.join(BACKUP_DIR, `backup_${DateTime.now().toFormat('yyyyLLdd_HHmmss')}.json`);
   await atomicWrite(file, db);
-}, 1000 * 60 * 10);
+}, 1000 * 60 * BACKUP_INTERVAL_MIN);
+
+// ================= GLOBAL ERROR HANDLER =================
+process.on('unhandledRejection', console.error);
+process.on('uncaughtException', console.error);
 
 // ================= LOGIN =================
 await client.login(TOKEN);
