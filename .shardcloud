@@ -1,9 +1,0 @@
-# .shardcloud - config para ShardCloud (Node.js Discord bot)
-DISPLAY_NAME=Battle Manager
-DESCRIPTION=Discord bot (Node.js) com cron e persistência JSON
-LANGUAGE=node
-MAIN=index.js
-MEMORY=1024
-VERSION=recommended
-# Se você precisar executar build antes de start (por ex. TypeScript), descomente a linha abaixo e remova MAIN
-# CUSTOM_COMMAND=npm run build && npm start
