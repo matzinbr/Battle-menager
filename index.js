@@ -1,4 +1,15 @@
-/**
+/**// === Robust ReadableStream polyfill (place this at the VERY TOP of index.js) ===
+// 1) prefer native stream/web (Node 18+)
+// 2) fallback imediato para ponyfill (se por algum motivo stream/web não expuser ReadableStream global)
+import { ReadableStream as NodeReadableStream } from 'stream/web';
+import { ReadableStream as PolyReadableStream } from 'web-streams-polyfill/ponyfill';
+
+// Apply the available implementation to globalThis (guarantee before undici loads)
+globalThis.ReadableStream ??= (NodeReadableStream || PolyReadableStream);
+
+// debug log — remove depois de verificar nos logs do host
+console.log('[startup] ReadableStream ok?', typeof globalThis.ReadableStream);
+
  * index.perfect.js — versão final "perfeita"
  * - Node.js (ESM). Defina { "type": "module" } no package.json
  * - Recursos implementados:
