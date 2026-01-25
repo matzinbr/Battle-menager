@@ -15,6 +15,21 @@
  *
  * Use com: node index.perfect.js
  */
+// ===== Polyfill ReadableStream para undici (resolve: ReferenceError: ReadableStream is not defined) =====
+try {
+  // Node 18+ fornece stream/web
+  const { ReadableStream } = await import('stream/web');
+  globalThis.ReadableStream ??= ReadableStream;
+} catch (err) {
+  // fallback: polyfill se stream/web não estiver disponível
+  try {
+    const poly = await import('web-streams-polyfill/ponyfill');
+    globalThis.ReadableStream ??= poly.ReadableStream;
+  } catch (e) {
+    // se falhar aqui, mostraremos erro mais explícito no console ao iniciar
+    console.warn('Aviso: não foi possível polyfill ReadableStream automaticamente.', e);
+  }
+}
 
 import dotenv from 'dotenv';
 dotenv.config();
