@@ -1,3 +1,14 @@
+// index.js — Polyfill robusto para ReadableStream (COLOQUE ISTO NO TOPO, antes de qualquer outro import)
+// Requisitos: package.json com "type":"module" e dependência web-streams-polyfill (fallback).
+import { ReadableStream as NodeReadableStream } from 'stream/web';
+import { ReadableStream as PolyReadableStream } from 'web-streams-polyfill/ponyfill';
+
+// define globalThis.ReadableStream de forma segura (prioriza implementacao nativa)
+globalThis.ReadableStream = globalThis.ReadableStream || NodeReadableStream || PolyReadableStream;
+
+// debug (remove depois): deve imprimir "function" nos logs do container
+console.log('[startup] ReadableStream ok?', typeof globalThis.ReadableStream);
+
 /**// === Robust ReadableStream polyfill (place this at the VERY TOP of index.js) ===
 // 1) prefer native stream/web (Node 18+)
 // 2) fallback imediato para ponyfill (se por algum motivo stream/web não expuser ReadableStream global)
