@@ -1,5 +1,5 @@
 // ======================================================
-// Battle Manager — economia reformulada e mais realista
+// Battle Manager — economia, work e batalhas mais realistas
 // Node.js + discord.js v14 + ESM
 // ======================================================
 
@@ -21,7 +21,7 @@ import {
 
 dotenv.config();
 
-const TOKEN = process.env.TOKEN;
+const TOKEN = process.env.TOKEN || process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const TZ = process.env.TZ || 'America/Sao_Paulo';
@@ -40,6 +40,14 @@ const now = () => DateTime.now().setZone(TZ);
 const todayISO = () => now().toISODate();
 const fmt = (n) => new Intl.NumberFormat('pt-BR').format(Math.max(0, Math.floor(n)));
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const rollInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+const strip = (s = '') =>
+  s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 
 let writeQueue = Promise.resolve();
 async function atomicWrite(file, data) {
@@ -69,8 +77,9 @@ function ensurePlayerShape(player) {
   player.losses ??= 0;
   player.streak ??= 0;
   player.economy ??= { lastSundayClaim: null };
+  player.work ??= { lastClaim: null, streak: 0 };
   player.gambling ??= { wins: 0, losses: 0, streak: 0 };
-  player.shenanigans ??= { lastSunday: null };
+  player.battle ??= { wins: 0, losses: 0, streak: 0 };
   return player;
 }
 
@@ -103,7 +112,7 @@ async function saveApostas(config) {
   await fsp.writeFile(APOSTAS_CONFIG, JSON.stringify(config, null, 2));
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 const commands = [];
 const commandMap = new Map();
 
@@ -112,8 +121,40 @@ function registerCommand(command) {
   commandMap.set(command.data.name, command);
 }
 
-function makeMoneyEmbed(title, description, color = 'Blurple') {
+function makeEmbed(title, description, color = 'Blurple') {
   return new EmbedBuilder().setTitle(title).setDescription(description).setColor(color).setTimestamp();
+}
+
+async function getMember(interaction) {
+  return interaction.guild.members.fetch(interaction.user.id);
+}
+
+function isStaffLike(member) {
+  if (!member) return false;
+  const names = new Set([
+    'admin',
+    'adm',
+    'administrator',
+    'fundador',
+    'fundadores',
+    'superior',
+    'superiores',
+    'owner',
+    'owners',
+    'staff',
+    'moderador',
+    'moderadores',
+    'mod',
+    'dev',
+    'developer',
+  ].map(strip));
+
+  if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
+  return member.roles.cache.some((role) => names.has(strip(role.name)));
+}
+
+function weekdayName() {
+  return ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'][now().weekday % 7];
 }
 
 // ===================================================
@@ -186,7 +227,7 @@ registerCommand({
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
     const embed = new EmbedBuilder()
-      .setTitle(`${player.name} — Inventário`)
+      .setTitle(`🎒 ${player.name} — Inventário`)
       .setColor('Green')
       .addFields(
         { name: 'Sukuna Finger', value: `${player.inventory.sukuna_finger}`, inline: true },
@@ -206,7 +247,7 @@ registerCommand({
     const player = getPlayer(interaction.user);
     const sunday = player.economy.lastSundayClaim === todayISO() ? 'Já recebido hoje' : 'Disponível no próximo domingo';
     const embed = new EmbedBuilder()
-      .setTitle(`${player.name} — Perfil`)
+      .setTitle(`👤 ${player.name} — Perfil`)
       .setColor('Blue')
       .addFields(
         { name: 'Carteira', value: fmt(player.wallet), inline: true },
@@ -215,8 +256,9 @@ registerCommand({
         { name: 'Vitórias', value: `${player.wins}`, inline: true },
         { name: 'Derrotas', value: `${player.losses}`, inline: true },
         { name: 'Streak', value: `${player.streak}`, inline: true },
-        { name: 'Bet wins', value: `${player.gambling.wins}`, inline: true },
-        { name: 'Bet losses', value: `${player.gambling.losses}`, inline: true },
+        { name: 'Apostas ganhas', value: `${player.gambling.wins}`, inline: true },
+        { name: 'Apostas perdidas', value: `${player.gambling.losses}`, inline: true },
+        { name: 'Batalhas', value: `${player.battle.wins} / ${player.battle.losses}`, inline: true },
         { name: 'Renda de domingo', value: sunday, inline: false }
       )
       .setTimestamp();
@@ -234,7 +276,10 @@ registerCommand({
       .map((p) => ensurePlayerShape(p))
       .sort((a, b) => b.wallet + b.bank - (a.wallet + a.bank))
       .slice(0, 5)
-      .map((p, i) => `#${i + 1} ${p.name} — ${fmt(p.wallet + p.bank)} yens (carteira ${fmt(p.wallet)} / banco ${fmt(p.bank)})`)
+      .map(
+        (p, i) =>
+          `#${i + 1} ${p.name} — ${fmt(p.wallet + p.bank)} yens (carteira ${fmt(p.wallet)} / banco ${fmt(p.bank)})`
+      )
       .join('\n');
 
     const embed = new EmbedBuilder()
@@ -242,6 +287,158 @@ registerCommand({
       .setDescription(top || 'Nenhum jogador registrado')
       .setColor('Gold')
       .setTimestamp();
+    await interaction.reply({ embeds: [embed] });
+  },
+});
+
+// ===================================================
+// /work
+// - staff / superiores / fundadores só podem usar no domingo
+// ===================================================
+const STAFF_WORK_MIN = 140;
+const STAFF_WORK_MAX = 240;
+const WEEKDAY_WORK_MIN = 160;
+const WEEKDAY_WORK_MAX = 310;
+const SATURDAY_WORK_MIN = 180;
+const SATURDAY_WORK_MAX = 340;
+const SUNDAY_WORK_MIN = 380;
+const SUNDAY_WORK_MAX = 640;
+
+registerCommand({
+  data: new SlashCommandBuilder().setName('work').setDescription('Trabalhar e ganhar yens'),
+  execute: async (interaction) => {
+    const player = getPlayer(interaction.user);
+    const member = await getMember(interaction);
+    const currentDay = now().weekday;
+    const today = todayISO();
+
+    if (player.work.lastClaim === today) {
+      return interaction.reply({ content: 'Você já trabalhou hoje.', ephemeral: true });
+    }
+
+    if (isStaffLike(member) && currentDay !== 7) {
+      return interaction.reply({
+        content: 'Cargos de staff, adm, superiores e fundadores só podem usar o /work aos domingos.',
+        ephemeral: true,
+      });
+    }
+
+    let base;
+    if (currentDay === 7) base = rollInt(SUNDAY_WORK_MIN, SUNDAY_WORK_MAX);
+    else if (currentDay === 6) base = rollInt(SATURDAY_WORK_MIN, SATURDAY_WORK_MAX);
+    else base = rollInt(WEEKDAY_WORK_MIN, WEEKDAY_WORK_MAX);
+
+    if (isStaffLike(member) && currentDay === 7) {
+      base = rollInt(STAFF_WORK_MIN, STAFF_WORK_MAX) + 180;
+    }
+
+    const activityBonus = clamp(Math.floor(player.wins * 4 + player.battle.wins * 8 + player.work.streak * 12), 0, 140);
+    const payout = clamp(base + activityBonus, 0, 1200);
+
+    player.wallet = clamp(player.wallet + payout, 0, 5000);
+    const previousClaim = player.work.lastClaim;
+    const yesterday = now().minus({ days: 1 }).toISODate();
+    player.work.lastClaim = today;
+    player.work.streak = previousClaim === yesterday ? player.work.streak + 1 : 1;
+
+    log('work', { user: player.id, payout, day: weekdayName(), staff: isStaffLike(member) });
+    await queueWrite(db);
+
+    const embed = new EmbedBuilder()
+      .setTitle('💼 Trabalho concluído')
+      .setColor('Green')
+      .addFields(
+        { name: 'Dia', value: weekdayName(), inline: true },
+        { name: 'Base', value: fmt(base), inline: true },
+        { name: 'Bônus', value: fmt(activityBonus), inline: true },
+        { name: 'Total ganho', value: fmt(payout), inline: true }
+      )
+      .setFooter({ text: isStaffLike(member) ? 'Staff só trabalha aos domingos.' : 'Você pode trabalhar 1 vez por dia.' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+  },
+});
+
+// ===================================================
+// /battle
+// ===================================================
+registerCommand({
+  data: new SlashCommandBuilder()
+    .setName('battle')
+    .setDescription('Desafiar alguém para uma batalha')
+    .addUserOption((o) => o.setName('oponente').setDescription('Quem vai lutar').setRequired(true)),
+  execute: async (interaction) => {
+    const challenger = getPlayer(interaction.user);
+    const targetUser = interaction.options.getUser('oponente');
+
+    if (targetUser.bot) return interaction.reply({ content: 'Não dá para batalhar com bots.', ephemeral: true });
+    if (targetUser.id === interaction.user.id) return interaction.reply({ content: 'Você não pode lutar contra si mesmo.', ephemeral: true });
+
+    const opponent = getPlayer(targetUser);
+    const challengerScore =
+      challenger.wins * 2 + challenger.battle.wins * 4 + challenger.streak * 2 + rollInt(1, 100);
+    const opponentScore = opponent.wins * 2 + opponent.battle.wins * 4 + opponent.streak * 2 + rollInt(1, 100);
+    const total = challengerScore + opponentScore;
+    const chance = total === 0 ? 0.5 : challengerScore / total;
+    const roll = Math.random();
+    const challengerWins = roll < chance;
+
+    const winner = challengerWins ? challenger : opponent;
+    const loser = challengerWins ? opponent : challenger;
+    const reward = rollInt(80, 220);
+    const loserLoss = clamp(rollInt(35, 120), 0, loser.wallet);
+
+    if (challengerWins) {
+      winner.wallet = clamp(winner.wallet + reward + loserLoss, 0, 5000);
+      loser.wallet = clamp(loser.wallet - loserLoss, 0, 5000);
+      challenger.battle.wins += 1;
+      challenger.battle.streak += 1;
+      challenger.wins += 1;
+      challenger.streak += 1;
+      opponent.battle.losses += 1;
+      opponent.battle.streak = 0;
+      opponent.losses += 1;
+      opponent.streak = 0;
+    } else {
+      winner.wallet = clamp(winner.wallet + reward + loserLoss, 0, 5000);
+      loser.wallet = clamp(loser.wallet - loserLoss, 0, 5000);
+      opponent.battle.wins += 1;
+      opponent.battle.streak += 1;
+      opponent.wins += 1;
+      opponent.streak += 1;
+      challenger.battle.losses += 1;
+      challenger.battle.streak = 0;
+      challenger.losses += 1;
+      challenger.streak = 0;
+    }
+
+    log('battle', {
+      challenger: challenger.id,
+      opponent: opponent.id,
+      roll,
+      chance,
+      challengerScore,
+      opponentScore,
+      winner: winner.id,
+    });
+    await queueWrite(db);
+
+    const embed = new EmbedBuilder()
+      .setTitle('⚔️ Batalha encerrada')
+      .setColor(challengerWins ? 'Green' : 'Red')
+      .setDescription(
+        challengerWins
+          ? `**${interaction.user.username}** venceu **${targetUser.username}**.`
+          : `**${targetUser.username}** venceu **${interaction.user.username}**.`
+      )
+      .addFields(
+        { name: 'Chance estimada', value: `${Math.round(chance * 100)}%`, inline: true },
+        { name: 'Prêmio', value: fmt(reward), inline: true },
+        { name: 'Perda do derrotado', value: fmt(loserLoss), inline: true }
+      )
+      .setTimestamp();
+
     await interaction.reply({ embeds: [embed] });
   },
 });
@@ -258,6 +455,7 @@ registerCommand({
     const backupFile = path.join(BACKUP_DIR, 'latest.json');
     if (!fs.existsSync(backupFile)) return interaction.reply({ content: 'Nenhum backup encontrado', ephemeral: true });
     const restored = JSON.parse(await fsp.readFile(backupFile, 'utf8'));
+
     Object.assign(db, restored);
     await queueWrite(db);
     await interaction.reply('✅ Backup restaurado com sucesso');
@@ -290,7 +488,7 @@ registerCommand({
 
     const base = SUNDAY_BASE_MIN + Math.floor(Math.random() * (SUNDAY_BASE_MAX - SUNDAY_BASE_MIN + 1));
     const activityBonus = clamp(
-      Math.floor(player.wins * 18 + player.streak * 12 + player.gambling.wins * 8),
+      Math.floor(player.wins * 18 + player.streak * 12 + player.gambling.wins * 8 + player.battle.wins * 10),
       0,
       WEEKLY_ACTIVITY_BONUS_CAP
     );
@@ -330,15 +528,15 @@ registerCommand({
 // /bet  -> aposta realista
 // ===================================================
 const betTable = {
-  baixo: { chance: 0.62, multiplier: 1.55, label: 'Baixo risco' },
-  medio: { chance: 0.45, multiplier: 2.05, label: 'Risco médio' },
-  alto: { chance: 0.28, multiplier: 3.25, label: 'Alto risco' },
+  baixo: { chance: 0.49, multiplier: 1.95, label: 'Baixo risco' },
+  medio: { chance: 0.31, multiplier: 2.85, label: 'Risco médio' },
+  alto: { chance: 0.16, multiplier: 5.1, label: 'Alto risco' },
 };
 
 registerCommand({
   data: new SlashCommandBuilder()
     .setName('bet')
-    .setDescription('Fazer uma aposta com risco e retorno realistas')
+    .setDescription('Fazer uma aposta com risco e retorno mais realistas')
     .addIntegerOption((o) => o.setName('valor').setDescription('Valor apostado').setRequired(true))
     .addStringOption((o) =>
       o
@@ -357,6 +555,7 @@ registerCommand({
     const risk = interaction.options.getString('risco');
     const config = betTable[risk];
 
+    if (!config) return interaction.reply({ content: 'Risco inválido.', ephemeral: true });
     if (value <= 0) return interaction.reply({ content: 'Aposta inválida.', ephemeral: true });
     if (value > player.wallet) return interaction.reply({ content: 'Você não tem yens suficientes.', ephemeral: true });
 
@@ -375,7 +574,7 @@ registerCommand({
       log('bet_win', { user: player.id, value, risk, roll, payout });
       await queueWrite(db);
 
-      const embed = makeMoneyEmbed(
+      const embed = makeEmbed(
         '🎰 Aposta vencedora',
         `Risco: **${config.label}**\nApostado: **${fmt(value)}**\nRecebeu: **${fmt(payout)}**\nLucro líquido: **${fmt(payout - value)}**`,
         'Green'
@@ -391,9 +590,9 @@ registerCommand({
     log('bet_loss', { user: player.id, value, risk, roll });
     await queueWrite(db);
 
-    const embed = makeMoneyEmbed(
+    const embed = makeEmbed(
       '💥 Aposta perdida',
-      `Risco: **${config.label}**\nPerdeu: **${fmt(value)}**\nChance do bilhete: **${Math.round(config.chance * 100)}%**`,
+      `Risco: **${config.label}**\nPerdeu: **${fmt(value)}**\nChance de acerto: **${Math.round(config.chance * 100)}%**`,
       'Red'
     );
     return interaction.reply({ embeds: [embed] });
@@ -406,6 +605,7 @@ registerCommand({
 const apostasBaseCommand = new SlashCommandBuilder()
   .setName('apostas')
   .setDescription('Gerenciar apostas do servidor')
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
   .addSubcommand((sub) => sub.setName('criar').setDescription('Ativar aposta do servidor'))
   .addSubcommand((sub) =>
     sub
