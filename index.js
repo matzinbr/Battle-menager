@@ -1,14 +1,9 @@
-// ======================================================
-// Battle Manager — economia, work e batalhas mais realistas
-// Node.js + discord.js v14 + ESM
-// ======================================================
-
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
-import { DateTime } from 'luxon';
 import dotenv from 'dotenv';
+import { DateTime } from 'luxon';
 import {
   Client,
   GatewayIntentBits,
@@ -33,41 +28,80 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 const ROOT = process.cwd();
 const DATA_PATH = path.join(ROOT, 'data.json');
 const BACKUP_DIR = path.join(ROOT, 'backups');
-const APOSTAS_CONFIG = path.join(ROOT, 'apostasConfig.json');
+const CONFIG_PATH = path.join(ROOT, 'apostasConfig.json');
+
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
 const now = () => DateTime.now().setZone(TZ);
 const todayISO = () => now().toISODate();
+const isoStamp = () => now().toISO();
+const weekdayIndex = () => now().weekday; // 1 = Monday ... 7 = Sunday
+const weekdayName = () => ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'][weekdayIndex() % 7];
 const fmt = (n) => new Intl.NumberFormat('pt-BR').format(Math.max(0, Math.floor(n)));
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const rollInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
-const strip = (s = '') =>
-  s
+const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+const strip = (text = '') =>
+  text
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 
+const AFFILIATE_ROLE_HINTS = new Set(
+  ['admin', 'adm', 'administrator', 'fundador', 'fundadores', 'superior', 'superiores', 'owner', 'staff', 'moderador', 'moderadores', 'mod', 'dev', 'developer'].map(strip)
+);
+
 let writeQueue = Promise.resolve();
-async function atomicWrite(file, data) {
-  const tmp = `${file}.tmp`;
+
+async function atomicWrite(filePath, data) {
+  const tmp = `${filePath}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(data, null, 2));
-  await fsp.rename(tmp, file);
+  await fsp.rename(tmp, filePath);
 }
+
 function queueWrite(db) {
   writeQueue = writeQueue.then(() => atomicWrite(DATA_PATH, db));
   return writeQueue;
 }
-async function loadDB() {
-  if (!fs.existsSync(DATA_PATH)) {
-    const base = { players: {}, logs: [], meta: { createdAt: now().toISO() } };
-    await atomicWrite(DATA_PATH, base);
-    return base;
+
+async function loadJson(filePath, fallback) {
+  try {
+    const raw = await fsp.readFile(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
   }
-  return JSON.parse(await fsp.readFile(DATA_PATH, 'utf8'));
 }
+
+async function loadDB() {
+  const fallback = {
+    players: {},
+    meta: { createdAt: isoStamp() },
+    logs: [],
+  };
+  const db = await loadJson(DATA_PATH, fallback);
+  db.players ||= {};
+  db.logs ||= [];
+  db.meta ||= { createdAt: isoStamp() };
+  return db;
+}
+
+async function loadConfig() {
+  const fallback = {
+    guilds: {},
+  };
+  const cfg = await loadJson(CONFIG_PATH, fallback);
+  cfg.guilds ||= {};
+  return cfg;
+}
+
+async function saveConfig(cfg) {
+  await atomicWrite(CONFIG_PATH, cfg);
+}
+
 const db = await loadDB();
+const config = await loadConfig();
 
 function ensurePlayerShape(player) {
   player.wallet ??= 600;
@@ -80,6 +114,7 @@ function ensurePlayerShape(player) {
   player.work ??= { lastClaim: null, streak: 0 };
   player.gambling ??= { wins: 0, losses: 0, streak: 0 };
   player.battle ??= { wins: 0, losses: 0, streak: 0 };
+  player.createdAt ??= isoStamp();
   return player;
 }
 
@@ -88,6 +123,7 @@ function getPlayer(user) {
     db.players[user.id] = ensurePlayerShape({
       id: user.id,
       name: user.username,
+      createdAt: isoStamp(),
     });
   }
   const player = db.players[user.id];
@@ -95,21 +131,49 @@ function getPlayer(user) {
   return ensurePlayerShape(player);
 }
 
-function log(type, data) {
-  db.logs.unshift({ id: crypto.randomUUID(), at: now().toISO(), type, data });
+function log(type, payload) {
+  db.logs.unshift({
+    id: crypto.randomUUID(),
+    at: isoStamp(),
+    type,
+    payload,
+  });
   if (db.logs.length > 500) db.logs.length = 500;
 }
 
-async function loadApostas() {
-  try {
-    const data = await fsp.readFile(APOSTAS_CONFIG, 'utf8');
-    return JSON.parse(data);
-  } catch {
-    return {};
-  }
+function makeEmbed(title, description, color = 0x8b5cf6) {
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(description)
+    .setColor(color)
+    .setFooter({ text: 'Battle Manager • economia e batalha' })
+    .setTimestamp();
 }
-async function saveApostas(config) {
-  await fsp.writeFile(APOSTAS_CONFIG, JSON.stringify(config, null, 2));
+
+function isStaffLike(member) {
+  if (!member) return false;
+  if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
+  return member.roles?.cache?.some((role) => AFFILIATE_ROLE_HINTS.has(strip(role.name))) ?? false;
+}
+
+async function getMember(interaction) {
+  return interaction.guild.members.fetch(interaction.user.id);
+}
+
+function toSundayLabel(lastClaim) {
+  return lastClaim === todayISO() ? 'Já recebido hoje' : 'Disponível no próximo domingo';
+}
+
+function getGuildConfig(guildId) {
+  if (!config.guilds[guildId]) {
+    config.guilds[guildId] = {
+      enabled: true,
+      commandName: 'shenanigans_bet',
+      sundayBonusBoost: 1,
+      workEnabled: true,
+    };
+  }
+  return config.guilds[guildId];
 }
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
@@ -117,138 +181,117 @@ const commands = [];
 const commandMap = new Map();
 
 function registerCommand(command) {
-  commands.push(command.data.toJSON());
-  commandMap.set(command.data.name, command);
+  const name = command.data.name;
+  if (commandMap.has(name)) {
+    throw new Error(`Comando duplicado: ${name}`);
+  }
+  const serialized = command.data.toJSON();
+  commands.push(serialized);
+  commandMap.set(name, command);
 }
 
-function makeEmbed(title, description, color = 'Blurple') {
-  return new EmbedBuilder().setTitle(title).setDescription(description).setColor(color).setTimestamp();
+function workRewardForDay(isStaff, player) {
+  const day = weekdayIndex();
+  const profileWeight = clamp(Math.floor(player.wins * 4 + player.battle.wins * 7 + player.work.streak * 10), 0, 150);
+
+  if (day === 7) {
+    const base = isStaff ? randInt(220, 360) : randInt(420, 720);
+    return { base, bonus: profileWeight, totalCap: isStaff ? 700 : 1200 };
+  }
+  if (day === 6) return { base: randInt(120, 250), bonus: profileWeight, totalCap: 500 };
+  return { base: randInt(90, 180), bonus: profileWeight, totalCap: 420 };
 }
 
-async function getMember(interaction) {
-  return interaction.guild.members.fetch(interaction.user.id);
+function battlePower(player) {
+  return (
+    player.wins * 3 +
+    player.battle.wins * 6 +
+    player.battle.streak * 4 +
+    player.streak * 2 +
+    Math.floor(player.wallet / 250) +
+    Math.floor(player.bank / 500) +
+    randInt(0, 45)
+  );
 }
 
-function isStaffLike(member) {
-  if (!member) return false;
-  const names = new Set([
-    'admin',
-    'adm',
-    'administrator',
-    'fundador',
-    'fundadores',
-    'superior',
-    'superiores',
-    'owner',
-    'owners',
-    'staff',
-    'moderador',
-    'moderadores',
-    'mod',
-    'dev',
-    'developer',
-  ].map(strip));
-
-  if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
-  return member.roles.cache.some((role) => names.has(strip(role.name)));
+async function saveAndReturn(interaction, payload) {
+  await queueWrite(db);
+  return interaction.reply(payload);
 }
 
-function weekdayName() {
-  return ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'][now().weekday % 7];
-}
-
-// ===================================================
-// /ping
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder().setName('ping').setDescription('Teste de latência'),
   execute: async (interaction) => interaction.reply(`🏓 Pong ${interaction.client.ws.ping}ms`),
 });
 
-// ===================================================
-// /balance
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder().setName('balance').setDescription('Ver saldo'),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    await interaction.reply(
+    return interaction.reply(
       `💴 Carteira: ${fmt(player.wallet)}\n🏦 Banco: ${fmt(player.bank)}\n💰 Total: ${fmt(player.wallet + player.bank)}`
     );
   },
 });
 
-// ===================================================
-// /deposit
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder()
     .setName('deposit')
-    .setDescription('Depositar yens')
+    .setDescription('Depositar yens no banco')
     .addIntegerOption((o) => o.setName('valor').setDescription('Valor').setRequired(true)),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    const v = interaction.options.getInteger('valor');
-    if (v <= 0 || v > player.wallet) return interaction.reply({ content: 'Valor inválido', ephemeral: true });
-    player.wallet -= v;
-    player.bank += v;
-    log('deposit', { user: player.id, v });
+    const value = interaction.options.getInteger('valor');
+    if (value <= 0 || value > player.wallet) return interaction.reply({ content: 'Valor inválido.', ephemeral: true });
+    player.wallet -= value;
+    player.bank += value;
+    log('deposit', { user: player.id, value });
     await queueWrite(db);
-    await interaction.reply(`🏦 Depositado ${fmt(v)} yens`);
+    return interaction.reply(`🏦 Depositado **${fmt(value)}** yens.`);
   },
 });
 
-// ===================================================
-// /withdraw
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder()
     .setName('withdraw')
-    .setDescription('Sacar yens')
+    .setDescription('Sacar yens do banco')
     .addIntegerOption((o) => o.setName('valor').setDescription('Valor').setRequired(true)),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    const v = interaction.options.getInteger('valor');
-    if (v <= 0 || v > player.bank) return interaction.reply({ content: 'Valor inválido', ephemeral: true });
-    if (player.wallet + v > 5000) return interaction.reply({ content: 'Limite da carteira excedido', ephemeral: true });
-    player.bank -= v;
-    player.wallet += v;
-    log('withdraw', { user: player.id, v });
+    const value = interaction.options.getInteger('valor');
+    if (value <= 0 || value > player.bank) return interaction.reply({ content: 'Valor inválido.', ephemeral: true });
+    if (player.wallet + value > 5000) return interaction.reply({ content: 'Limite da carteira excedido.', ephemeral: true });
+    player.bank -= value;
+    player.wallet += value;
+    log('withdraw', { user: player.id, value });
     await queueWrite(db);
-    await interaction.reply(`💸 Sacado ${fmt(v)} yens`);
+    return interaction.reply(`💸 Sacado **${fmt(value)}** yens.`);
   },
 });
 
-// ===================================================
-// /inventory
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder().setName('inventory').setDescription('Ver inventário'),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
     const embed = new EmbedBuilder()
       .setTitle(`🎒 ${player.name} — Inventário`)
-      .setColor('Green')
+      .setColor(0x22c55e)
       .addFields(
         { name: 'Sukuna Finger', value: `${player.inventory.sukuna_finger}`, inline: true },
         { name: 'Gokumonkyo', value: `${player.inventory.gokumonkyo}`, inline: true }
       )
       .setTimestamp();
-    await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   },
 });
 
-// ===================================================
-// /profile
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder().setName('profile').setDescription('Perfil do usuário'),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    const sunday = player.economy.lastSundayClaim === todayISO() ? 'Já recebido hoje' : 'Disponível no próximo domingo';
     const embed = new EmbedBuilder()
       .setTitle(`👤 ${player.name} — Perfil`)
-      .setColor('Blue')
+      .setColor(0x3b82f6)
       .addFields(
         { name: 'Carteira', value: fmt(player.wallet), inline: true },
         { name: 'Banco', value: fmt(player.bank), inline: true },
@@ -259,110 +302,82 @@ registerCommand({
         { name: 'Apostas ganhas', value: `${player.gambling.wins}`, inline: true },
         { name: 'Apostas perdidas', value: `${player.gambling.losses}`, inline: true },
         { name: 'Batalhas', value: `${player.battle.wins} / ${player.battle.losses}`, inline: true },
-        { name: 'Renda de domingo', value: sunday, inline: false }
+        { name: 'Renda de domingo', value: toSundayLabel(player.economy.lastSundayClaim), inline: false }
       )
       .setTimestamp();
-    await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   },
 });
 
-// ===================================================
-// /rank
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder().setName('rank').setDescription('Ranking dos jogadores'),
   execute: async (interaction) => {
     const top = Object.values(db.players)
       .map((p) => ensurePlayerShape(p))
       .sort((a, b) => b.wallet + b.bank - (a.wallet + a.bank))
-      .slice(0, 5)
+      .slice(0, 10)
       .map(
         (p, i) =>
-          `#${i + 1} ${p.name} — ${fmt(p.wallet + p.bank)} yens (carteira ${fmt(p.wallet)} / banco ${fmt(p.bank)})`
+          `**#${i + 1}** ${p.name} — **${fmt(p.wallet + p.bank)}** yens (${fmt(p.wallet)} na carteira / ${fmt(p.bank)} no banco)`
       )
       .join('\n');
 
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 Ranking Top 5')
-      .setDescription(top || 'Nenhum jogador registrado')
-      .setColor('Gold')
-      .setTimestamp();
-    await interaction.reply({ embeds: [embed] });
+    const embed = makeEmbed('🏆 Ranking Top 10', top || 'Nenhum jogador registrado ainda.', 0xf59e0b);
+    return interaction.reply({ embeds: [embed] });
   },
 });
 
-// ===================================================
-// /work
-// - staff / superiores / fundadores só podem usar no domingo
-// ===================================================
-const STAFF_WORK_MIN = 140;
-const STAFF_WORK_MAX = 240;
-const WEEKDAY_WORK_MIN = 160;
-const WEEKDAY_WORK_MAX = 310;
-const SATURDAY_WORK_MIN = 180;
-const SATURDAY_WORK_MAX = 340;
-const SUNDAY_WORK_MIN = 380;
-const SUNDAY_WORK_MAX = 640;
-
 registerCommand({
-  data: new SlashCommandBuilder().setName('work').setDescription('Trabalhar e ganhar yens'),
+  data: new SlashCommandBuilder()
+    .setName('work-yen')
+    .setDescription('Trabalhar e ganhar yens')
+    .addBooleanOption((o) => o.setName('mostrar_status').setDescription('Mostra a regra de domingo para staff')),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
     const member = await getMember(interaction);
-    const currentDay = now().weekday;
+    const day = weekdayIndex();
     const today = todayISO();
+    const staff = isStaffLike(member);
 
     if (player.work.lastClaim === today) {
       return interaction.reply({ content: 'Você já trabalhou hoje.', ephemeral: true });
     }
 
-    if (isStaffLike(member) && currentDay !== 7) {
+    if (staff && day !== 7) {
       return interaction.reply({
-        content: 'Cargos de staff, adm, superiores e fundadores só podem usar o /work aos domingos.',
+        content: 'Cargos de superior, adm, fundador e staff só podem usar o `/work-yen` aos domingos.',
         ephemeral: true,
       });
     }
 
-    let base;
-    if (currentDay === 7) base = rollInt(SUNDAY_WORK_MIN, SUNDAY_WORK_MAX);
-    else if (currentDay === 6) base = rollInt(SATURDAY_WORK_MIN, SATURDAY_WORK_MAX);
-    else base = rollInt(WEEKDAY_WORK_MIN, WEEKDAY_WORK_MAX);
-
-    if (isStaffLike(member) && currentDay === 7) {
-      base = rollInt(STAFF_WORK_MIN, STAFF_WORK_MAX) + 180;
-    }
-
-    const activityBonus = clamp(Math.floor(player.wins * 4 + player.battle.wins * 8 + player.work.streak * 12), 0, 140);
-    const payout = clamp(base + activityBonus, 0, 1200);
-
+    const reward = workRewardForDay(staff, player);
+    const payout = clamp(reward.base + reward.bonus, 0, reward.totalCap);
     player.wallet = clamp(player.wallet + payout, 0, 5000);
-    const previousClaim = player.work.lastClaim;
+
     const yesterday = now().minus({ days: 1 }).toISODate();
+    const previousClaim = player.work.lastClaim;
     player.work.lastClaim = today;
     player.work.streak = previousClaim === yesterday ? player.work.streak + 1 : 1;
 
-    log('work', { user: player.id, payout, day: weekdayName(), staff: isStaffLike(member) });
+    log('work', { user: player.id, payout, day: weekdayName(), staff });
     await queueWrite(db);
 
     const embed = new EmbedBuilder()
       .setTitle('💼 Trabalho concluído')
-      .setColor('Green')
+      .setColor(0x10b981)
       .addFields(
         { name: 'Dia', value: weekdayName(), inline: true },
-        { name: 'Base', value: fmt(base), inline: true },
-        { name: 'Bônus', value: fmt(activityBonus), inline: true },
+        { name: 'Base', value: fmt(reward.base), inline: true },
+        { name: 'Bônus', value: fmt(reward.bonus), inline: true },
         { name: 'Total ganho', value: fmt(payout), inline: true }
       )
-      .setFooter({ text: isStaffLike(member) ? 'Staff só trabalha aos domingos.' : 'Você pode trabalhar 1 vez por dia.' })
+      .setFooter({ text: staff ? 'Staff, adm e fundadores só trabalham aos domingos.' : 'Você pode usar 1 vez por dia.' })
       .setTimestamp();
 
-    await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   },
 });
 
-// ===================================================
-// /battle
-// ===================================================
 registerCommand({
   data: new SlashCommandBuilder()
     .setName('battle')
@@ -376,108 +391,90 @@ registerCommand({
     if (targetUser.id === interaction.user.id) return interaction.reply({ content: 'Você não pode lutar contra si mesmo.', ephemeral: true });
 
     const opponent = getPlayer(targetUser);
-    const challengerScore =
-      challenger.wins * 2 + challenger.battle.wins * 4 + challenger.streak * 2 + rollInt(1, 100);
-    const opponentScore = opponent.wins * 2 + opponent.battle.wins * 4 + opponent.streak * 2 + rollInt(1, 100);
-    const total = challengerScore + opponentScore;
-    const chance = total === 0 ? 0.5 : challengerScore / total;
+    const challengerPower = battlePower(challenger);
+    const opponentPower = battlePower(opponent);
+    const total = challengerPower + opponentPower;
+    const chance = total <= 0 ? 0.5 : challengerPower / total;
     const roll = Math.random();
     const challengerWins = roll < chance;
 
     const winner = challengerWins ? challenger : opponent;
     const loser = challengerWins ? opponent : challenger;
-    const reward = rollInt(80, 220);
-    const loserLoss = clamp(rollInt(35, 120), 0, loser.wallet);
+    const winnerMember = challengerWins ? interaction.user : targetUser;
+    const loserMember = challengerWins ? targetUser : interaction.user;
+
+    const basePrize = randInt(70, 180);
+    const stakeFromLoser = clamp(Math.round(loser.wallet * randInt(4, 12) / 100), 25, 260);
+    const totalPrize = basePrize + stakeFromLoser;
+
+    winner.wallet = clamp(winner.wallet + totalPrize, 0, 5000);
+    loser.wallet = clamp(loser.wallet - stakeFromLoser, 0, 5000);
 
     if (challengerWins) {
-      winner.wallet = clamp(winner.wallet + reward + loserLoss, 0, 5000);
-      loser.wallet = clamp(loser.wallet - loserLoss, 0, 5000);
-      challenger.battle.wins += 1;
-      challenger.battle.streak += 1;
       challenger.wins += 1;
       challenger.streak += 1;
-      opponent.battle.losses += 1;
-      opponent.battle.streak = 0;
+      challenger.battle.wins += 1;
+      challenger.battle.streak += 1;
       opponent.losses += 1;
       opponent.streak = 0;
+      opponent.battle.losses += 1;
+      opponent.battle.streak = 0;
     } else {
-      winner.wallet = clamp(winner.wallet + reward + loserLoss, 0, 5000);
-      loser.wallet = clamp(loser.wallet - loserLoss, 0, 5000);
-      opponent.battle.wins += 1;
-      opponent.battle.streak += 1;
       opponent.wins += 1;
       opponent.streak += 1;
-      challenger.battle.losses += 1;
-      challenger.battle.streak = 0;
+      opponent.battle.wins += 1;
+      opponent.battle.streak += 1;
       challenger.losses += 1;
       challenger.streak = 0;
+      challenger.battle.losses += 1;
+      challenger.battle.streak = 0;
     }
 
     log('battle', {
       challenger: challenger.id,
       opponent: opponent.id,
-      roll,
+      challengerPower,
+      opponentPower,
       chance,
-      challengerScore,
-      opponentScore,
+      roll,
       winner: winner.id,
+      stakeFromLoser,
+      totalPrize,
     });
     await queueWrite(db);
 
     const embed = new EmbedBuilder()
       .setTitle('⚔️ Batalha encerrada')
-      .setColor(challengerWins ? 'Green' : 'Red')
+      .setColor(challengerWins ? 0x22c55e : 0xef4444)
       .setDescription(
         challengerWins
-          ? `**${interaction.user.username}** venceu **${targetUser.username}**.`
-          : `**${targetUser.username}** venceu **${interaction.user.username}**.`
+          ? `**${winnerMember.username}** venceu **${loserMember.username}**.`
+          : `**${winnerMember.username}** venceu **${loserMember.username}**.`
       )
       .addFields(
         { name: 'Chance estimada', value: `${Math.round(chance * 100)}%`, inline: true },
-        { name: 'Prêmio', value: fmt(reward), inline: true },
-        { name: 'Perda do derrotado', value: fmt(loserLoss), inline: true }
+        { name: 'Prêmio', value: fmt(totalPrize), inline: true },
+        { name: 'Perda do derrotado', value: fmt(stakeFromLoser), inline: true }
       )
       .setTimestamp();
 
-    await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   },
 });
-
-// ===================================================
-// /backup_restore
-// ===================================================
-registerCommand({
-  data: new SlashCommandBuilder()
-    .setName('backup_restore')
-    .setDescription('Restaurar último backup')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  execute: async (interaction) => {
-    const backupFile = path.join(BACKUP_DIR, 'latest.json');
-    if (!fs.existsSync(backupFile)) return interaction.reply({ content: 'Nenhum backup encontrado', ephemeral: true });
-    const restored = JSON.parse(await fsp.readFile(backupFile, 'utf8'));
-
-    Object.assign(db, restored);
-    await queueWrite(db);
-    await interaction.reply('✅ Backup restaurado com sucesso');
-  },
-});
-
-// ===================================================
-// /shenanigans_bet  -> renda semanal de domingo
-// ===================================================
-const SUNDAY_BASE_MIN = 350;
-const SUNDAY_BASE_MAX = 650;
-const BANK_INTEREST_RATE = 0.015;
-const WEEKLY_ACTIVITY_BONUS_CAP = 250;
 
 registerCommand({
   data: new SlashCommandBuilder()
     .setName('shenanigans_bet')
-    .setDescription('Receber renda de domingo (1x por domingo)'),
+    .setDescription('Receber a renda de domingo'),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
+    const guildCfg = getGuildConfig(interaction.guildId);
 
-    if (now().weekday !== 7) {
+    if (!guildCfg.enabled) {
+      return interaction.reply({ content: 'Esse sistema está desativado no servidor.', ephemeral: true });
+    }
+
+    if (weekdayIndex() !== 7) {
       return interaction.reply({ content: 'Esse pagamento só libera aos domingos.', ephemeral: true });
     }
 
@@ -486,57 +483,54 @@ registerCommand({
       return interaction.reply({ content: 'Você já recebeu a renda de domingo hoje.', ephemeral: true });
     }
 
-    const base = SUNDAY_BASE_MIN + Math.floor(Math.random() * (SUNDAY_BASE_MAX - SUNDAY_BASE_MIN + 1));
+    const base = randInt(380, 760);
     const activityBonus = clamp(
-      Math.floor(player.wins * 18 + player.streak * 12 + player.gambling.wins * 8 + player.battle.wins * 10),
+      Math.floor(player.wins * 14 + player.streak * 9 + player.gambling.wins * 10 + player.battle.wins * 12 + player.work.streak * 6),
       0,
-      WEEKLY_ACTIVITY_BONUS_CAP
+      320
     );
-    const interest = clamp(Math.floor(player.bank * BANK_INTEREST_RATE), 0, 1000);
+    const loyaltyBonus = clamp(Math.floor(player.bank * 0.012), 0, 900);
     const totalPayout = base + activityBonus;
 
     player.wallet = clamp(player.wallet + totalPayout, 0, 5000);
-    player.bank += interest;
+    player.bank = clamp(player.bank + loyaltyBonus, 0, 100000);
     player.economy.lastSundayClaim = sunday;
 
     log('sunday_pay', {
       user: player.id,
       base,
       activityBonus,
-      interest,
+      loyaltyBonus,
       totalPayout,
     });
     await queueWrite(db);
 
     const embed = new EmbedBuilder()
       .setTitle('💴 Renda de domingo liberada')
-      .setColor('Green')
+      .setColor(0xf59e0b)
       .addFields(
         { name: 'Salário base', value: fmt(base), inline: true },
         { name: 'Bônus de atividade', value: fmt(activityBonus), inline: true },
-        { name: 'Juros no banco', value: fmt(interest), inline: true },
+        { name: 'Juros/bonificação do banco', value: fmt(loyaltyBonus), inline: true },
         { name: 'Total na carteira', value: fmt(totalPayout), inline: true }
       )
       .setFooter({ text: 'Esse comando só funciona uma vez por domingo.' })
       .setTimestamp();
 
-    await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   },
 });
 
-// ===================================================
-// /bet  -> aposta realista
-// ===================================================
-const betTable = {
-  baixo: { chance: 0.49, multiplier: 1.95, label: 'Baixo risco' },
-  medio: { chance: 0.31, multiplier: 2.85, label: 'Risco médio' },
-  alto: { chance: 0.16, multiplier: 5.1, label: 'Alto risco' },
+const BET_RISKS = {
+  baixo: { chance: 0.47, multiplier: 1.9, label: 'Baixo risco' },
+  medio: { chance: 0.29, multiplier: 2.7, label: 'Risco médio' },
+  alto: { chance: 0.14, multiplier: 4.8, label: 'Alto risco' },
 };
 
 registerCommand({
   data: new SlashCommandBuilder()
     .setName('bet')
-    .setDescription('Fazer uma aposta com risco e retorno mais realistas')
+    .setDescription('Fazer uma aposta com chance mais realista')
     .addIntegerOption((o) => o.setName('valor').setDescription('Valor apostado').setRequired(true))
     .addStringOption((o) =>
       o
@@ -553,115 +547,167 @@ registerCommand({
     const player = getPlayer(interaction.user);
     const value = interaction.options.getInteger('valor');
     const risk = interaction.options.getString('risco');
-    const config = betTable[risk];
+    const meta = BET_RISKS[risk];
 
-    if (!config) return interaction.reply({ content: 'Risco inválido.', ephemeral: true });
+    if (!meta) return interaction.reply({ content: 'Risco inválido.', ephemeral: true });
     if (value <= 0) return interaction.reply({ content: 'Aposta inválida.', ephemeral: true });
     if (value > player.wallet) return interaction.reply({ content: 'Você não tem yens suficientes.', ephemeral: true });
 
-    const roll = Math.random();
-    const win = roll < config.chance;
     player.wallet -= value;
 
+    const roll = Math.random();
+    const bonusVariance = risk === 'alto' ? randInt(0, 18) : risk === 'medio' ? randInt(0, 12) : randInt(0, 8);
+    const win = roll < meta.chance;
+
     if (win) {
-      const payout = Math.floor(value * config.multiplier);
+      const payout = Math.floor(value * meta.multiplier) + bonusVariance;
       player.wallet = clamp(player.wallet + payout, 0, 5000);
       player.gambling.wins += 1;
       player.gambling.streak += 1;
-      player.streak += 1;
       player.wins += 1;
+      player.streak += 1;
 
       log('bet_win', { user: player.id, value, risk, roll, payout });
       await queueWrite(db);
 
-      const embed = makeEmbed(
-        '🎰 Aposta vencedora',
-        `Risco: **${config.label}**\nApostado: **${fmt(value)}**\nRecebeu: **${fmt(payout)}**\nLucro líquido: **${fmt(payout - value)}**`,
-        'Green'
-      );
-      return interaction.reply({ embeds: [embed] });
+      return interaction.reply({
+        embeds: [
+          makeEmbed(
+            '🎰 Aposta vencedora',
+            `Risco: **${meta.label}**\nApostado: **${fmt(value)}**\nRecebeu: **${fmt(payout)}**\nLucro líquido: **${fmt(payout - value)}**`,
+            0x22c55e
+          ),
+        ],
+      });
     }
 
     player.gambling.losses += 1;
     player.gambling.streak = 0;
-    player.streak = 0;
     player.losses += 1;
+    player.streak = 0;
 
     log('bet_loss', { user: player.id, value, risk, roll });
     await queueWrite(db);
 
-    const embed = makeEmbed(
-      '💥 Aposta perdida',
-      `Risco: **${config.label}**\nPerdeu: **${fmt(value)}**\nChance de acerto: **${Math.round(config.chance * 100)}%**`,
-      'Red'
-    );
+    return interaction.reply({
+      embeds: [
+        makeEmbed(
+          '💥 Aposta perdida',
+          `Risco: **${meta.label}**\nPerdeu: **${fmt(value)}**\nChance de acerto: **${Math.round(meta.chance * 100)}%**`,
+          0xef4444
+        ),
+      ],
+    });
+  },
+});
+
+registerCommand({
+  data: new SlashCommandBuilder()
+    .setName('apostas')
+    .setDescription('Gerenciar a economia de apostas do servidor')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand((sub) => sub.setName('status').setDescription('Ver a configuração atual'))
+    .addSubcommand((sub) =>
+      sub
+        .setName('editar_nome')
+        .setDescription('Trocar o nome interno da renda de domingo')
+        .addStringOption((o) => o.setName('novo_nome').setDescription('Novo nome').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('ativar')
+        .setDescription('Ativar o sistema do servidor')
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('desativar')
+        .setDescription('Desativar o sistema do servidor')
+    ),
+  execute: async (interaction) => {
+    const guildCfg = getGuildConfig(interaction.guildId);
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === 'editar_nome') {
+      const newName = interaction.options.getString('novo_nome');
+      const old = guildCfg.commandName;
+      guildCfg.commandName = newName;
+      await saveConfig(config);
+      return interaction.reply(`✅ Nome alterado de **${old}** para **${newName}**.`);
+    }
+
+    if (sub === 'ativar') {
+      guildCfg.enabled = true;
+      await saveConfig(config);
+      return interaction.reply('✅ Sistema ativado no servidor.');
+    }
+
+    if (sub === 'desativar') {
+      guildCfg.enabled = false;
+      await saveConfig(config);
+      return interaction.reply('✅ Sistema desativado no servidor.');
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('⚙️ Configuração da Economia')
+      .setColor(guildCfg.enabled ? 0x22c55e : 0xef4444)
+      .addFields(
+        { name: 'Ativo', value: guildCfg.enabled ? 'Sim' : 'Não', inline: true },
+        { name: 'Nome interno', value: guildCfg.commandName || 'shenanigans_bet', inline: true },
+        { name: 'Bônus semanal', value: `${guildCfg.sundayBonusBoost ?? 1}x`, inline: true },
+      )
+      .setTimestamp();
     return interaction.reply({ embeds: [embed] });
   },
 });
 
-// ===================================================
-// /apostas
-// ===================================================
-const apostasBaseCommand = new SlashCommandBuilder()
-  .setName('apostas')
-  .setDescription('Gerenciar apostas do servidor')
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-  .addSubcommand((sub) => sub.setName('criar').setDescription('Ativar aposta do servidor'))
-  .addSubcommand((sub) =>
-    sub
-      .setName('editar_nome')
-      .setDescription('Trocar nome da aposta')
-      .addStringOption((o) => o.setName('novo_nome').setDescription('Novo nome').setRequired(true))
-  )
-  .addSubcommand((sub) => sub.setName('status').setDescription('Ver configuração da aposta'));
-
 registerCommand({
-  data: apostasBaseCommand,
+  data: new SlashCommandBuilder()
+    .setName('backup_restore')
+    .setDescription('Restaurar o último backup')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   execute: async (interaction) => {
-    const serverId = interaction.guildId;
-    const apostasConfig = await loadApostas();
-    if (!apostasConfig[serverId]) apostasConfig[serverId] = { name: 'shenanigans_bet', enabled: true };
-
-    const sub = interaction.options.getSubcommand();
-
-    if (sub === 'criar') {
-      apostasConfig[serverId].enabled = true;
-      await saveApostas(apostasConfig);
-      return interaction.reply(`✅ Aposta ativada no servidor. Comando: **${apostasConfig[serverId].name}**`);
-    }
-
-    if (sub === 'editar_nome') {
-      const currentName = apostasConfig[serverId].name;
-      const newName = interaction.options.getString('novo_nome');
-      apostasConfig[serverId].name = newName;
-      await saveApostas(apostasConfig);
-      return interaction.reply(`✅ Nome da aposta alterado: **${newName}** (antes: ${currentName})`);
-    }
-
-    if (sub === 'status') {
-      const embed = new EmbedBuilder()
-        .setTitle('⚙️ Configuração da Aposta')
-        .setDescription(`Nome do comando: **${apostasConfig[serverId].name}**\nHabilitado: ${apostasConfig[serverId].enabled}`)
-        .setColor('Purple')
-        .setTimestamp();
-      return interaction.reply({ embeds: [embed] });
-    }
+    const backupFile = path.join(BACKUP_DIR, 'latest.json');
+    if (!fs.existsSync(backupFile)) return interaction.reply({ content: 'Nenhum backup encontrado.', ephemeral: true });
+    const restored = JSON.parse(await fsp.readFile(backupFile, 'utf8'));
+    db.players = restored.players || {};
+    db.logs = restored.logs || [];
+    db.meta = restored.meta || { createdAt: isoStamp() };
+    await queueWrite(db);
+    return interaction.reply('✅ Backup restaurado com sucesso.');
   },
 });
 
-// ===================================================
-// READY / REGISTER
-// ===================================================
+registerCommand({
+  data: new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Ver os comandos principais'),
+  execute: async (interaction) => {
+    const embed = new EmbedBuilder()
+      .setTitle('✨ Comandos principais')
+      .setColor(0x6366f1)
+      .setDescription(
+        [
+          '`/work-yen` — ganhar yens no dia certo',
+          '`/shenanigans_bet` — renda de domingo',
+          '`/bet` — aposta com risco realista',
+          '`/battle` — batalha entre jogadores',
+          '`/balance` — saldo atual',
+          '`/profile` — perfil e status',
+        ].join('\n')
+      )
+      .setTimestamp();
+    return interaction.reply({ embeds: [embed] });
+  },
+});
+
 const rest = new REST({ version: '10' }).setToken(TOKEN);
+
 client.once('ready', async () => {
   console.log(`🔥 Online como ${client.user.tag}`);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-  console.log('✅ Todos os comandos registrados com sucesso');
+  console.log(`✅ ${commands.length} comandos registrados com sucesso`);
 });
 
-// ===================================================
-// INTERACTIONS
-// ===================================================
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const cmd = commandMap.get(interaction.commandName);
@@ -669,9 +715,9 @@ client.on('interactionCreate', async (interaction) => {
 
   try {
     await cmd.execute(interaction);
-  } catch (err) {
-    console.error(err);
-    const payload = { content: 'Erro interno', ephemeral: true };
+  } catch (error) {
+    console.error(error);
+    const payload = { content: 'Erro interno ao executar o comando.', ephemeral: true };
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp(payload);
     } else {
@@ -680,12 +726,18 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ===================================================
-// BACKUP AUTOMÁTICO
-// ===================================================
 setInterval(async () => {
-  const file = path.join(BACKUP_DIR, 'latest.json');
-  await atomicWrite(file, db);
+  const backupFile = path.join(BACKUP_DIR, 'latest.json');
+  await atomicWrite(backupFile, db);
 }, 1000 * 60 * 10);
+
+process.on('SIGINT', async () => {
+  try {
+    await atomicWrite(DATA_PATH, db);
+    await saveConfig(config);
+  } finally {
+    process.exit(0);
+  }
+});
 
 await client.login(TOKEN);
