@@ -40,6 +40,7 @@ const weekdayName = () => ['domingo', 'segunda', 'terça', 'quarta', 'quinta', '
 const fmt = (n) => new Intl.NumberFormat('pt-BR').format(Math.max(0, Math.floor(n)));
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+const pct = (n) => `${Math.round(n * 100)}%`;
 const strip = (text = '') =>
   text
     .toLowerCase()
@@ -48,15 +49,32 @@ const strip = (text = '') =>
     .replace(/\s+/g, ' ')
     .trim();
 
-const AFFILIATE_ROLE_HINTS = new Set(
-  ['admin', 'adm', 'administrator', 'fundador', 'fundadores', 'superior', 'superiores', 'owner', 'staff', 'moderador', 'moderadores', 'mod', 'dev', 'developer'].map(strip)
+const STAFF_ROLE_HINTS = new Set(
+  [
+    'admin',
+    'adm',
+    'administrator',
+    'fundador',
+    'fundadores',
+    'owner',
+    'dono',
+    'superior',
+    'superiores',
+    'staff',
+    'moderador',
+    'moderadores',
+    'mod',
+    'dev',
+    'developer',
+    'staff manager',
+  ].map(strip)
 );
 
 let writeQueue = Promise.resolve();
 
 async function atomicWrite(filePath, data) {
   const tmp = `${filePath}.tmp`;
-  await fsp.writeFile(tmp, JSON.stringify(data, null, 2));
+  await fsp.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
   await fsp.rename(tmp, filePath);
 }
 
@@ -88,9 +106,7 @@ async function loadDB() {
 }
 
 async function loadConfig() {
-  const fallback = {
-    guilds: {},
-  };
+  const fallback = { guilds: {} };
   const cfg = await loadJson(CONFIG_PATH, fallback);
   cfg.guilds ||= {};
   return cfg;
@@ -141,27 +157,31 @@ function log(type, payload) {
   if (db.logs.length > 500) db.logs.length = 500;
 }
 
-function makeEmbed(title, description, color = 0x8b5cf6) {
+function embedBase(title, description, color = 0x8b5cf6) {
   return new EmbedBuilder()
     .setTitle(title)
     .setDescription(description)
     .setColor(color)
-    .setFooter({ text: 'Battle Manager • economia e batalha' })
+    .setFooter({ text: 'Battle Manager • economia, apostas e batalhas' })
     .setTimestamp();
+}
+
+function embedSuccess(title, description) {
+  return embedBase(`✅ ${title}`, description, 0x22c55e);
+}
+
+function embedWarn(title, description) {
+  return embedBase(`⚠️ ${title}`, description, 0xf59e0b);
+}
+
+function embedError(title, description) {
+  return embedBase(`❌ ${title}`, description, 0xef4444);
 }
 
 function isStaffLike(member) {
   if (!member) return false;
   if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
-  return member.roles?.cache?.some((role) => AFFILIATE_ROLE_HINTS.has(strip(role.name))) ?? false;
-}
-
-async function getMember(interaction) {
-  return interaction.guild.members.fetch(interaction.user.id);
-}
-
-function toSundayLabel(lastClaim) {
-  return lastClaim === todayISO() ? 'Já recebido hoje' : 'Disponível no próximo domingo';
+  return member.roles?.cache?.some((role) => STAFF_ROLE_HINTS.has(strip(role.name))) ?? false;
 }
 
 function getGuildConfig(guildId) {
@@ -171,23 +191,15 @@ function getGuildConfig(guildId) {
       commandName: 'shenanigans_bet',
       sundayBonusBoost: 1,
       workEnabled: true,
+      battleEnabled: true,
+      betEnabled: true,
     };
   }
   return config.guilds[guildId];
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
-const commands = [];
-const commandMap = new Map();
-
-function registerCommand(command) {
-  const name = command.data.name;
-  if (commandMap.has(name)) {
-    throw new Error(`Comando duplicado: ${name}`);
-  }
-  const serialized = command.data.toJSON();
-  commands.push(serialized);
-  commandMap.set(name, command);
+function toSundayLabel(lastClaim) {
+  return lastClaim === todayISO() ? 'Recebido hoje' : 'Disponível no próximo domingo';
 }
 
 function workRewardForDay(isStaff, player) {
@@ -214,23 +226,44 @@ function battlePower(player) {
   );
 }
 
-async function saveAndReturn(interaction, payload) {
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+const commands = [];
+const commandMap = new Map();
+
+function registerCommand(command) {
+  const name = command.data.name;
+  if (commandMap.has(name)) {
+    throw new Error(`Comando duplicado: ${name}`);
+  }
+  const serialized = command.data.toJSON();
+  commands.push(serialized);
+  commandMap.set(name, command);
+}
+
+async function persistAndReply(interaction, payload) {
   await queueWrite(db);
   return interaction.reply(payload);
 }
 
 registerCommand({
   data: new SlashCommandBuilder().setName('ping').setDescription('Teste de latência'),
-  execute: async (interaction) => interaction.reply(`🏓 Pong ${interaction.client.ws.ping}ms`),
+  execute: async (interaction) => interaction.reply(`🏓 Pong **${interaction.client.ws.ping}ms**`),
 });
 
 registerCommand({
   data: new SlashCommandBuilder().setName('balance').setDescription('Ver saldo'),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    return interaction.reply(
-      `💴 Carteira: ${fmt(player.wallet)}\n🏦 Banco: ${fmt(player.bank)}\n💰 Total: ${fmt(player.wallet + player.bank)}`
+    const embed = embedBase(
+      '💰 Seu saldo',
+      [
+        `**Carteira:** ${fmt(player.wallet)} yens`,
+        `**Banco:** ${fmt(player.bank)} yens`,
+        `**Total:** ${fmt(player.wallet + player.bank)} yens`,
+      ].join('\n'),
+      0x6366f1
     );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   },
 });
 
@@ -243,11 +276,16 @@ registerCommand({
     const player = getPlayer(interaction.user);
     const value = interaction.options.getInteger('valor');
     if (value <= 0 || value > player.wallet) return interaction.reply({ content: 'Valor inválido.', ephemeral: true });
+
     player.wallet -= value;
     player.bank += value;
     log('deposit', { user: player.id, value });
     await queueWrite(db);
-    return interaction.reply(`🏦 Depositado **${fmt(value)}** yens.`);
+
+    return interaction.reply({
+      embeds: [embedSuccess('Depósito realizado', `Você depositou **${fmt(value)}** yens no banco.`)],
+      ephemeral: true,
+    });
   },
 });
 
@@ -261,11 +299,16 @@ registerCommand({
     const value = interaction.options.getInteger('valor');
     if (value <= 0 || value > player.bank) return interaction.reply({ content: 'Valor inválido.', ephemeral: true });
     if (player.wallet + value > 5000) return interaction.reply({ content: 'Limite da carteira excedido.', ephemeral: true });
+
     player.bank -= value;
     player.wallet += value;
     log('withdraw', { user: player.id, value });
     await queueWrite(db);
-    return interaction.reply(`💸 Sacado **${fmt(value)}** yens.`);
+
+    return interaction.reply({
+      embeds: [embedSuccess('Saque realizado', `Você sacou **${fmt(value)}** yens do banco.`)],
+      ephemeral: true,
+    });
   },
 });
 
@@ -273,15 +316,15 @@ registerCommand({
   data: new SlashCommandBuilder().setName('inventory').setDescription('Ver inventário'),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    const embed = new EmbedBuilder()
-      .setTitle(`🎒 ${player.name} — Inventário`)
-      .setColor(0x22c55e)
-      .addFields(
-        { name: 'Sukuna Finger', value: `${player.inventory.sukuna_finger}`, inline: true },
-        { name: 'Gokumonkyo', value: `${player.inventory.gokumonkyo}`, inline: true }
-      )
-      .setTimestamp();
-    return interaction.reply({ embeds: [embed] });
+    const embed = embedBase(
+      `🎒 Inventário de ${player.name}`,
+      [
+        `**Sukuna Finger:** ${fmt(player.inventory.sukuna_finger)}`,
+        `**Gokumonkyo:** ${fmt(player.inventory.gokumonkyo)}`,
+      ].join('\n'),
+      0x14b8a6
+    );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   },
 });
 
@@ -289,23 +332,23 @@ registerCommand({
   data: new SlashCommandBuilder().setName('profile').setDescription('Perfil do usuário'),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    const embed = new EmbedBuilder()
-      .setTitle(`👤 ${player.name} — Perfil`)
-      .setColor(0x3b82f6)
-      .addFields(
-        { name: 'Carteira', value: fmt(player.wallet), inline: true },
-        { name: 'Banco', value: fmt(player.bank), inline: true },
-        { name: 'Total', value: fmt(player.wallet + player.bank), inline: true },
-        { name: 'Vitórias', value: `${player.wins}`, inline: true },
-        { name: 'Derrotas', value: `${player.losses}`, inline: true },
-        { name: 'Streak', value: `${player.streak}`, inline: true },
-        { name: 'Apostas ganhas', value: `${player.gambling.wins}`, inline: true },
-        { name: 'Apostas perdidas', value: `${player.gambling.losses}`, inline: true },
-        { name: 'Batalhas', value: `${player.battle.wins} / ${player.battle.losses}`, inline: true },
-        { name: 'Renda de domingo', value: toSundayLabel(player.economy.lastSundayClaim), inline: false }
-      )
-      .setTimestamp();
-    return interaction.reply({ embeds: [embed] });
+    const embed = embedBase(
+      `👤 Perfil de ${player.name}`,
+      'Resumo geral do seu progresso no servidor.',
+      0x3b82f6
+    ).addFields(
+      { name: 'Carteira', value: `${fmt(player.wallet)}`, inline: true },
+      { name: 'Banco', value: `${fmt(player.bank)}`, inline: true },
+      { name: 'Total', value: `${fmt(player.wallet + player.bank)}`, inline: true },
+      { name: 'Vitórias', value: `${fmt(player.wins)}`, inline: true },
+      { name: 'Derrotas', value: `${fmt(player.losses)}`, inline: true },
+      { name: 'Streak', value: `${fmt(player.streak)}`, inline: true },
+      { name: 'Apostas ganhas', value: `${fmt(player.gambling.wins)}`, inline: true },
+      { name: 'Apostas perdidas', value: `${fmt(player.gambling.losses)}`, inline: true },
+      { name: 'Batalhas', value: `${fmt(player.battle.wins)} / ${fmt(player.battle.losses)}`, inline: true },
+      { name: 'Renda de domingo', value: toSundayLabel(player.economy.lastSundayClaim), inline: false }
+    );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   },
 });
 
@@ -322,7 +365,7 @@ registerCommand({
       )
       .join('\n');
 
-    const embed = makeEmbed('🏆 Ranking Top 10', top || 'Nenhum jogador registrado ainda.', 0xf59e0b);
+    const embed = embedBase('🏆 Ranking Top 10', top || 'Nenhum jogador registrado ainda.', 0xf59e0b);
     return interaction.reply({ embeds: [embed] });
   },
 });
@@ -334,18 +377,21 @@ registerCommand({
     .addBooleanOption((o) => o.setName('mostrar_status').setDescription('Mostra a regra de domingo para staff')),
   execute: async (interaction) => {
     const player = getPlayer(interaction.user);
-    const member = await getMember(interaction);
+    const member = await interaction.guild.members.fetch(interaction.user.id);
     const day = weekdayIndex();
     const today = todayISO();
     const staff = isStaffLike(member);
 
     if (player.work.lastClaim === today) {
-      return interaction.reply({ content: 'Você já trabalhou hoje.', ephemeral: true });
+      return interaction.reply({
+        embeds: [embedWarn('Trabalho já feito', 'Você já usou este comando hoje.')],
+        ephemeral: true,
+      });
     }
 
     if (staff && day !== 7) {
       return interaction.reply({
-        content: 'Cargos de superior, adm, fundador e staff só podem usar o `/work-yen` aos domingos.',
+        embeds: [embedError('Acesso restrito', 'Cargos de **adm, superior, fundador e staff** só podem usar o `/work-yen` aos **domingos**.')],
         ephemeral: true,
       });
     }
@@ -362,17 +408,18 @@ registerCommand({
     log('work', { user: player.id, payout, day: weekdayName(), staff });
     await queueWrite(db);
 
-    const embed = new EmbedBuilder()
-      .setTitle('💼 Trabalho concluído')
-      .setColor(0x10b981)
-      .addFields(
-        { name: 'Dia', value: weekdayName(), inline: true },
-        { name: 'Base', value: fmt(reward.base), inline: true },
-        { name: 'Bônus', value: fmt(reward.bonus), inline: true },
-        { name: 'Total ganho', value: fmt(payout), inline: true }
-      )
-      .setFooter({ text: staff ? 'Staff, adm e fundadores só trabalham aos domingos.' : 'Você pode usar 1 vez por dia.' })
-      .setTimestamp();
+    const embed = embedBase(
+      '💼 Trabalho concluído',
+      [
+        `**Dia:** ${weekdayName()}`,
+        `**Base:** ${fmt(reward.base)} yens`,
+        `**Bônus:** ${fmt(reward.bonus)} yens`,
+        `**Total ganho:** ${fmt(payout)} yens`,
+      ].join('\n'),
+      0x10b981
+    ).setFooter({
+      text: staff ? 'Staff, adm e fundadores só trabalham aos domingos.' : 'Uso liberado uma vez por dia.',
+    });
 
     return interaction.reply({ embeds: [embed] });
   },
@@ -400,8 +447,8 @@ registerCommand({
 
     const winner = challengerWins ? challenger : opponent;
     const loser = challengerWins ? opponent : challenger;
-    const winnerMember = challengerWins ? interaction.user : targetUser;
-    const loserMember = challengerWins ? targetUser : interaction.user;
+    const winnerUser = challengerWins ? interaction.user : targetUser;
+    const loserUser = challengerWins ? targetUser : interaction.user;
 
     const basePrize = randInt(70, 180);
     const stakeFromLoser = clamp(Math.round(loser.wallet * randInt(4, 12) / 100), 25, 260);
@@ -443,20 +490,17 @@ registerCommand({
     });
     await queueWrite(db);
 
-    const embed = new EmbedBuilder()
-      .setTitle('⚔️ Batalha encerrada')
-      .setColor(challengerWins ? 0x22c55e : 0xef4444)
-      .setDescription(
-        challengerWins
-          ? `**${winnerMember.username}** venceu **${loserMember.username}**.`
-          : `**${winnerMember.username}** venceu **${loserMember.username}**.`
-      )
-      .addFields(
-        { name: 'Chance estimada', value: `${Math.round(chance * 100)}%`, inline: true },
-        { name: 'Prêmio', value: fmt(totalPrize), inline: true },
-        { name: 'Perda do derrotado', value: fmt(stakeFromLoser), inline: true }
-      )
-      .setTimestamp();
+    const embed = embedBase(
+      '⚔️ Batalha encerrada',
+      [
+        `**Vencedor:** ${winnerUser.username}`,
+        `**Derrotado:** ${loserUser.username}`,
+        `**Chance estimada:** ${pct(chance)}`,
+        `**Prêmio:** ${fmt(totalPrize)} yens`,
+        `**Perda do derrotado:** ${fmt(stakeFromLoser)} yens`,
+      ].join('\n'),
+      challengerWins ? 0x22c55e : 0xef4444
+    );
 
     return interaction.reply({ embeds: [embed] });
   },
@@ -471,26 +515,27 @@ registerCommand({
     const guildCfg = getGuildConfig(interaction.guildId);
 
     if (!guildCfg.enabled) {
-      return interaction.reply({ content: 'Esse sistema está desativado no servidor.', ephemeral: true });
+      return interaction.reply({ embeds: [embedWarn('Sistema desativado', 'Esse sistema está desativado no servidor.')], ephemeral: true });
     }
 
     if (weekdayIndex() !== 7) {
-      return interaction.reply({ content: 'Esse pagamento só libera aos domingos.', ephemeral: true });
+      return interaction.reply({ embeds: [embedWarn('Domingo apenas', 'Esse pagamento só libera aos domingos.')], ephemeral: true });
     }
 
     const sunday = todayISO();
     if (player.economy.lastSundayClaim === sunday) {
-      return interaction.reply({ content: 'Você já recebeu a renda de domingo hoje.', ephemeral: true });
+      return interaction.reply({ embeds: [embedWarn('Já recebido', 'Você já recebeu a renda de domingo hoje.')], ephemeral: true });
     }
 
+    const boost = Number(guildCfg.sundayBonusBoost ?? 1);
     const base = randInt(380, 760);
     const activityBonus = clamp(
       Math.floor(player.wins * 14 + player.streak * 9 + player.gambling.wins * 10 + player.battle.wins * 12 + player.work.streak * 6),
       0,
       320
     );
-    const loyaltyBonus = clamp(Math.floor(player.bank * 0.012), 0, 900);
-    const totalPayout = base + activityBonus;
+    const loyaltyBonus = clamp(Math.floor(player.bank * 0.012 * boost), 0, 900);
+    const totalPayout = Math.floor((base + activityBonus) * boost);
 
     player.wallet = clamp(player.wallet + totalPayout, 0, 5000);
     player.bank = clamp(player.bank + loyaltyBonus, 0, 100000);
@@ -502,20 +547,21 @@ registerCommand({
       activityBonus,
       loyaltyBonus,
       totalPayout,
+      boost,
     });
     await queueWrite(db);
 
-    const embed = new EmbedBuilder()
-      .setTitle('💴 Renda de domingo liberada')
-      .setColor(0xf59e0b)
-      .addFields(
-        { name: 'Salário base', value: fmt(base), inline: true },
-        { name: 'Bônus de atividade', value: fmt(activityBonus), inline: true },
-        { name: 'Juros/bonificação do banco', value: fmt(loyaltyBonus), inline: true },
-        { name: 'Total na carteira', value: fmt(totalPayout), inline: true }
-      )
-      .setFooter({ text: 'Esse comando só funciona uma vez por domingo.' })
-      .setTimestamp();
+    const embed = embedBase(
+      '💴 Renda de domingo liberada',
+      [
+        `**Salário base:** ${fmt(base)} yens`,
+        `**Bônus de atividade:** ${fmt(activityBonus)} yens`,
+        `**Juros/bonificação:** ${fmt(loyaltyBonus)} yens`,
+        `**Multiplicador do servidor:** x${boost}`,
+        `**Total na carteira:** ${fmt(totalPayout)} yens`,
+      ].join('\n'),
+      0xf59e0b
+    ).setFooter({ text: 'Esse comando só funciona uma vez por domingo.' });
 
     return interaction.reply({ embeds: [embed] });
   },
@@ -554,7 +600,6 @@ registerCommand({
     if (value > player.wallet) return interaction.reply({ content: 'Você não tem yens suficientes.', ephemeral: true });
 
     player.wallet -= value;
-
     const roll = Math.random();
     const bonusVariance = risk === 'alto' ? randInt(0, 18) : risk === 'medio' ? randInt(0, 12) : randInt(0, 8);
     const win = roll < meta.chance;
@@ -570,15 +615,18 @@ registerCommand({
       log('bet_win', { user: player.id, value, risk, roll, payout });
       await queueWrite(db);
 
-      return interaction.reply({
-        embeds: [
-          makeEmbed(
-            '🎰 Aposta vencedora',
-            `Risco: **${meta.label}**\nApostado: **${fmt(value)}**\nRecebeu: **${fmt(payout)}**\nLucro líquido: **${fmt(payout - value)}**`,
-            0x22c55e
-          ),
-        ],
-      });
+      const embed = embedBase(
+        '🎰 Aposta vencedora',
+        [
+          `**Risco:** ${meta.label}`,
+          `**Apostado:** ${fmt(value)} yens`,
+          `**Recebeu:** ${fmt(payout)} yens`,
+          `**Lucro líquido:** ${fmt(payout - value)} yens`,
+        ].join('\n'),
+        0x22c55e
+      );
+
+      return interaction.reply({ embeds: [embed] });
     }
 
     player.gambling.losses += 1;
@@ -589,15 +637,18 @@ registerCommand({
     log('bet_loss', { user: player.id, value, risk, roll });
     await queueWrite(db);
 
-    return interaction.reply({
-      embeds: [
-        makeEmbed(
-          '💥 Aposta perdida',
-          `Risco: **${meta.label}**\nPerdeu: **${fmt(value)}**\nChance de acerto: **${Math.round(meta.chance * 100)}%**`,
-          0xef4444
-        ),
-      ],
-    });
+    const embed = embedBase(
+      '💥 Aposta perdida',
+      [
+        `**Risco:** ${meta.label}`,
+        `**Perdeu:** ${fmt(value)} yens`,
+        `**Chance de acerto:** ${pct(meta.chance)}`,
+        `**A roleta não sorriu hoje.**`,
+      ].join('\n'),
+      0xef4444
+    );
+
+    return interaction.reply({ embeds: [embed] });
   },
 });
 
@@ -613,15 +664,13 @@ registerCommand({
         .setDescription('Trocar o nome interno da renda de domingo')
         .addStringOption((o) => o.setName('novo_nome').setDescription('Novo nome').setRequired(true))
     )
+    .addSubcommand((sub) => sub.setName('ativar').setDescription('Ativar o sistema do servidor'))
+    .addSubcommand((sub) => sub.setName('desativar').setDescription('Desativar o sistema do servidor'))
     .addSubcommand((sub) =>
       sub
-        .setName('ativar')
-        .setDescription('Ativar o sistema do servidor')
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('desativar')
-        .setDescription('Desativar o sistema do servidor')
+        .setName('boost')
+        .setDescription('Ajustar o multiplicador da renda de domingo')
+        .addNumberOption((o) => o.setName('multiplicador').setDescription('Ex: 1.1').setRequired(true))
     ),
   execute: async (interaction) => {
     const guildCfg = getGuildConfig(interaction.guildId);
@@ -632,30 +681,43 @@ registerCommand({
       const old = guildCfg.commandName;
       guildCfg.commandName = newName;
       await saveConfig(config);
-      return interaction.reply(`✅ Nome alterado de **${old}** para **${newName}**.`);
+      return interaction.reply({ embeds: [embedSuccess('Nome alterado', `De **${old}** para **${newName}**.`)] });
     }
 
     if (sub === 'ativar') {
       guildCfg.enabled = true;
       await saveConfig(config);
-      return interaction.reply('✅ Sistema ativado no servidor.');
+      return interaction.reply({ embeds: [embedSuccess('Sistema ativado', 'A economia do servidor foi ativada.')] });
     }
 
     if (sub === 'desativar') {
       guildCfg.enabled = false;
       await saveConfig(config);
-      return interaction.reply('✅ Sistema desativado no servidor.');
+      return interaction.reply({ embeds: [embedWarn('Sistema desativado', 'A economia do servidor foi desativada.')] });
     }
 
-    const embed = new EmbedBuilder()
-      .setTitle('⚙️ Configuração da Economia')
-      .setColor(guildCfg.enabled ? 0x22c55e : 0xef4444)
-      .addFields(
-        { name: 'Ativo', value: guildCfg.enabled ? 'Sim' : 'Não', inline: true },
-        { name: 'Nome interno', value: guildCfg.commandName || 'shenanigans_bet', inline: true },
-        { name: 'Bônus semanal', value: `${guildCfg.sundayBonusBoost ?? 1}x`, inline: true },
-      )
-      .setTimestamp();
+    if (sub === 'boost') {
+      const multiplicador = interaction.options.getNumber('multiplicador');
+      if (!Number.isFinite(multiplicador) || multiplicador < 0.5 || multiplicador > 3) {
+        return interaction.reply({ content: 'Multiplicador inválido. Use um valor entre 0.5 e 3.', ephemeral: true });
+      }
+      guildCfg.sundayBonusBoost = multiplicador;
+      await saveConfig(config);
+      return interaction.reply({ embeds: [embedSuccess('Boost atualizado', `Multiplicador da renda de domingo definido para **x${multiplicador}**.`)] });
+    }
+
+    const embed = embedBase(
+      '⚙️ Configuração da economia',
+      [
+        `**Ativo:** ${guildCfg.enabled ? 'Sim' : 'Não'}`,
+        `**Nome interno:** ${guildCfg.commandName || 'shenanigans_bet'}`,
+        `**Bônus semanal:** x${guildCfg.sundayBonusBoost ?? 1}`,
+        `**Trabalho liberado:** ${guildCfg.workEnabled ? 'Sim' : 'Não'}`,
+        `**Apostas liberadas:** ${guildCfg.betEnabled ? 'Sim' : 'Não'}`,
+        `**Batalhas liberadas:** ${guildCfg.battleEnabled ? 'Sim' : 'Não'}`,
+      ].join('\n'),
+      0x8b5cf6
+    );
     return interaction.reply({ embeds: [embed] });
   },
 });
@@ -667,36 +729,36 @@ registerCommand({
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   execute: async (interaction) => {
     const backupFile = path.join(BACKUP_DIR, 'latest.json');
-    if (!fs.existsSync(backupFile)) return interaction.reply({ content: 'Nenhum backup encontrado.', ephemeral: true });
+    if (!fs.existsSync(backupFile)) {
+      return interaction.reply({ embeds: [embedError('Sem backup', 'Nenhum backup foi encontrado.')], ephemeral: true });
+    }
+
     const restored = JSON.parse(await fsp.readFile(backupFile, 'utf8'));
     db.players = restored.players || {};
     db.logs = restored.logs || [];
     db.meta = restored.meta || { createdAt: isoStamp() };
     await queueWrite(db);
-    return interaction.reply('✅ Backup restaurado com sucesso.');
+
+    return interaction.reply({ embeds: [embedSuccess('Backup restaurado', 'O último backup foi aplicado com sucesso.')] });
   },
 });
 
 registerCommand({
-  data: new SlashCommandBuilder()
-    .setName('help')
-    .setDescription('Ver os comandos principais'),
+  data: new SlashCommandBuilder().setName('help').setDescription('Ver os comandos principais'),
   execute: async (interaction) => {
-    const embed = new EmbedBuilder()
-      .setTitle('✨ Comandos principais')
-      .setColor(0x6366f1)
-      .setDescription(
-        [
-          '`/work-yen` — ganhar yens no dia certo',
-          '`/shenanigans_bet` — renda de domingo',
-          '`/bet` — aposta com risco realista',
-          '`/battle` — batalha entre jogadores',
-          '`/balance` — saldo atual',
-          '`/profile` — perfil e status',
-        ].join('\n')
-      )
-      .setTimestamp();
-    return interaction.reply({ embeds: [embed] });
+    const embed = embedBase(
+      '✨ Comandos principais',
+      [
+        '`/work-yen` — ganhar yens no dia certo',
+        '`/shenanigans_bet` — renda de domingo',
+        '`/bet` — aposta com risco realista',
+        '`/battle` — batalha entre jogadores',
+        '`/balance` — saldo atual',
+        '`/profile` — perfil e status',
+      ].join('\n'),
+      0x6366f1
+    );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   },
 });
 
@@ -704,8 +766,18 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 client.once('ready', async () => {
   console.log(`🔥 Online como ${client.user.tag}`);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-  console.log(`✅ ${commands.length} comandos registrados com sucesso`);
+
+  try {
+    // remove comandos globais antigos que costumam causar duplicação
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+
+    // registra apenas os comandos atuais neste servidor
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+
+    console.log(`✅ ${commands.length} comandos registrados com sucesso`);
+  } catch (error) {
+    console.error('Erro ao registrar comandos:', error);
+  }
 });
 
 client.on('interactionCreate', async (interaction) => {
